@@ -390,9 +390,9 @@ static ViewerCam initCam(math::Vector3 pos, math::Quat rot)
 
 Viewer::Impl::Impl(const Config &cfg)
     : cam(initCam(cfg.cameraPosition, cfg.cameraRotation)),
-      frameCfg{
-         .worldIDX = 0,
-         .viewIDX = 0,
+      frameCfg {
+          .worldIDX = 0,
+          .viewIDX = 0,
       },
       renderer(cfg.gpuID,
                cfg.renderWidth,
@@ -408,9 +408,9 @@ Viewer::Impl::Impl(const Config &cfg)
       cameraMoveSpeed(cfg.cameraMoveSpeed),
       shouldExit(false),
       voxelConfig {
-         .xLength = cfg.xLength,
-         .yLength = cfg.yLength,
-         .zLength = cfg.zLength,
+          .xLength = cfg.xLength,
+          .yLength = cfg.yLength,
+          .zLength = cfg.zLength,
       }
 {}
 
