@@ -1,4 +1,50 @@
-namespace madrona::phys2 {
+namespace madrona::phys {
+
+bool MeshBVH::traceRayLeafIndexed(int32_t leaf_idx,
+                           int32_t i,
+                           MeshBVH::RayIsectTxfm tri_isect_txfm,
+                           math::Vector3 ray_o,
+                           float t_max,
+                           float *out_hit_t,
+                           math::Vector3 *out_hit_normal) const
+{
+    using namespace madrona::math;
+
+    // Woop et al 2013 Watertight Ray/Triangle Intersection
+    Vector3 hit_normal;
+    float hit_t;
+    bool hit_tri = false;
+        Vector3 a, b, c;
+        bool tri_exists = fetchLeafTriangle(leaf_idx, i, &a, &b, &c);
+        bool intersects;
+        if(tri_exists) {
+             intersects = rayTriangleIntersection(
+                    a, b, c,
+                    tri_isect_txfm.kx, tri_isect_txfm.ky, tri_isect_txfm.kz,
+                    tri_isect_txfm.Sx, tri_isect_txfm.Sy, tri_isect_txfm.Sz,
+                    ray_o,
+                    t_max,
+                    &hit_t,
+                    &hit_normal);
+        }else{
+            intersects = false;
+        }
+
+
+        if (intersects) {
+            hit_tri = true;
+            t_max = hit_t;
+        }
+
+    if (hit_tri) {
+        *out_hit_t = hit_t;
+        *out_hit_normal = hit_normal;
+
+        return true;
+    } else {
+        return false;
+    }
+}
 
 bool MeshBVH::Node::isLeaf(madrona::CountT child) const
 {
@@ -90,32 +136,46 @@ bool MeshBVH::traceRay(math::Vector3 ray_o,
 {
     using namespace math;
     constexpr int STACK_SIZE = 32;
-    constexpr int TRACE_RAY_SHARED_SIZE = STACK_SIZE * sizeof(int32_t*) + sizeof(Vector3);
-    constexpr int THREADS_PER_RAY = 8;
+    constexpr int TRACE_RAY_SHARED_SIZE = STACK_SIZE * sizeof(int32_t) + sizeof(Vector3);
+    constexpr int THREADS_PER_RAY = 4;
+
 
 //#define MADRONA_GPU_MODE
 #ifdef MADRONA_GPU_MODE
-    int workerIndex = threadIdx.x % THREADS_PER_RAY;
-    int workerBlockIndex = threadIdx.x / THREADS_PER_RAY;
-    int groupMask = 0x00000FF << (workerBlockIndex*THREADS_PER_RAY);
+    const int32_t mwgpu_warp_id = threadIdx.x / 32;
+    const int32_t mwgpu_warp_lane = threadIdx.x % 32;
+    const int32_t num_smem_bytes_per_warp =
+        (mwGPU::SharedMemStorage::numBytesPerWarp()/4)*4;
+    int workerIndex = mwgpu_warp_lane % THREADS_PER_RAY;
+    int workerBlockIndex = mwgpu_warp_lane / THREADS_PER_RAY;
+    int groupMask = 0x000000F << (workerBlockIndex*THREADS_PER_RAY);
 
-
-    auto sharedMem = mwGPU::SharedMemStorage::buffer + workerBlockIndex * TRACE_RAY_SHARED_SIZE;
+    auto sharedMem = ((char*)mwGPU::SharedMemStorage::buffer) + mwgpu_warp_id * num_smem_bytes_per_warp +
+            TRACE_RAY_SHARED_SIZE * workerBlockIndex;
 
     Diag3x3 inv_d = Diag3x3::fromVec(ray_d).inv();
 
+
     RayIsectTxfm tri_isect_txfm = computeRayIsectTxfm(ray_o, ray_d, inv_d);
-    int32_t* stack = sharedMem;
+    int32_t* stack = (int32_t*)sharedMem;
     stack[0] = 0;
     CountT stack_size = 1;
 
+    int itercount = 0;
 
     bool ray_hit = false;
-    Vector3* closest_hit_normal = sharedMem;
-
+    Vector3* closest_hit_normal = (Vector3*)(sharedMem + STACK_SIZE * sizeof(int32_t));
+    //if(mwgpu_warp_id == 2 && mwgpu_warp_lane >= 4 && mwgpu_warp_lane <= 7)
+    //        mwGPU::HostPrint::log("{} {} {} {} start\n",itercount,mwgpu_warp_id,mwgpu_warp_lane,groupMask);
     while (stack_size > 0) {
-        __syncwarp(groupMask);
+        itercount += 1;
+        stack_size = __shfl_sync(groupMask, stack_size, workerBlockIndex * THREADS_PER_RAY);
         int32_t node_idx = stack[--stack_size];
+        node_idx = __shfl_sync(groupMask, node_idx, workerBlockIndex * THREADS_PER_RAY);
+
+        //if(mwgpu_warp_id == 2 && mwgpu_warp_lane >= 4 && mwgpu_warp_lane <= 7)
+        //    mwGPU::HostPrint::log("{} {} {} {} pop {}\n",itercount,mwgpu_warp_id,mwgpu_warp_lane,groupMask,node_idx);
+
         const Node &node = nodes[node_idx];
 
         //Each thread in the group calculates a bounding box
@@ -157,53 +217,117 @@ bool MeshBVH::traceRay(math::Vector3 ray_o,
         float t_far = fminf(t_far_x, fminf(t_far_y,
                                            fminf(t_far_z, t_max)));
 
-        bool shouldAdd = !node.hasChild(workerIndex) && t_near <= t_far;
-
-        int childNodeCollisionMask = __ballot_sync(0xF000000, shouldAdd);
+        bool shouldAdd = node.hasChild(workerIndex) && t_near <= t_far;
+        uint32_t childNodeCollisionMask = __ballot_sync(groupMask, shouldAdd);
+        childNodeCollisionMask = childNodeCollisionMask >> (workerBlockIndex*THREADS_PER_RAY);
 
         for(int i=0;i<MeshBVH::nodeWidth;i++) {
             bool hitBox = childNodeCollisionMask & 0x00000001;
+            //if(mwgpu_warp_id == 2 && mwgpu_warp_lane >= 4 && mwgpu_warp_lane <= 7)
+            //mwGPU::HostPrint::log("{} {} {} {} {} {} start\n",itercount,mwgpu_warp_id,mwgpu_warp_lane,childNodeCollisionMask,i,t_max);
             if (hitBox) {
+               // if(mwgpu_warp_id == 2 && mwgpu_warp_lane >= 4 && mwgpu_warp_lane <= 7)
+            //mwGPU::HostPrint::log("{} {} {} {} {} hit\n",itercount,mwgpu_warp_id,mwgpu_warp_lane,i,t_max);
                 if(node.isLeaf(i)) {
                     int32_t leaf_idx = node.leafIDX(i);
 
-                    float hit_t;
                     Vector3 leaf_hit_normal;
-                    bool leaf_hit = traceRayLeaf(leaf_idx, workerIndex, tri_isect_txfm,
-                                         ray_o, t_max, &hit_t, &leaf_hit_normal);
-
-                    //Find the closest hit
-                    int idx = workerIndex;
+                    float hit_t = float(FLT_MAX);
+                    int idx = workerIndex*2;
                     #pragma unroll
-                    for (int32_t w = 16; w >= 1; w /= 2) {
-                        float other_val = __shfl_xor_sync(groupMask, hit_t, w, 8);
-                        int32_t other_idx = __shfl_xor_sync(groupMask, idx, w, 8);
-                        if (other_val < val) {
-                            val = other_val;
-                            idx = other_idx;
+                    for (int32_t w = 0; w < 2; w++) {
+                        float subhit = float(FLT_MAX);
+                        bool leaf_hit = traceRayLeafIndexed(leaf_idx,workerIndex*2 + w, tri_isect_txfm,
+                                         ray_o, t_max, &subhit, &leaf_hit_normal);
+                        hit_t = fminf(hit_t,subhit);
+                        if (leaf_hit) {
+                            t_max = hit_t;
+                            idx = workerIndex*2 + w;
                         }
                     }
-                    if(idx == workerIndex){
+
+                    /*float hit_t;
+                    Vector3 leaf_hit_normal;
+                    bool leaf_hit = traceRayLeafIndexed(leaf_idx,workerIndex*2, tri_isect_txfm,
+                                         ray_o, t_max, &hit_t, &leaf_hit_normal);
+                    hit_t = leaf_hit ? hit_t : float(FLT_MAX);
+
+                    float hit_t2;
+                    Vector3 leaf_hit_normal2;
+                    bool leaf_hit2 = traceRayLeafIndexed(leaf_idx,workerIndex*2+1, tri_isect_txfm,
+                                         ray_o, t_max, &hit_t2, &leaf_hit_normal2);
+                    hit_t2 = leaf_hit2 ? hit_t2 : float(FLT_MAX);
+
+                    leaf_hit_normal = hit_t <= hit_t2 ? leaf_hit_normal : leaf_hit_normal2;
+                    int idx = hit_t <= hit_t2 ? workerIndex*2 : workerIndex*2 + 1;
+                    hit_t = fminf(hit_t, hit_t2);*/
+
+                    //if(mwgpu_warp_id == 2 && mwgpu_warp_lane >= 4 && mwgpu_warp_lane <= 7)
+                    //    mwGPU::HostPrint::log("{} {} {} {} {} {} start\n",itercount,mwgpu_warp_id,mwgpu_warp_lane,hit_t,idx,t_max);
+                    #pragma unroll
+                    for (int32_t w = 1; w <=2; w *= 2) {
+                        float other_val = __shfl_xor_sync(groupMask, hit_t, w);
+                        int32_t other_idx = __shfl_xor_sync(groupMask, idx, w);
+                        if (other_val < hit_t) {
+                            hit_t = other_val;
+                            idx = other_idx;
+                        }else if(other_val == hit_t && other_idx < idx){
+                            hit_t = other_val;
+                            idx = other_idx;
+                        }
+                        //if(mwclosestgpu_warp_id == 2 && mwgpu_warp_lane >= 4 && mwgpu_warp_lane <= 7)
+                        //    mwGPU::HostPrint::log("{} {} {} {} {} {} {} merge\n",itercount,mwgpu_warp_id,mwgpu_warp_lane,hit_t,idx,t_max,w);
+                    }
+                    if((hit_t != float(FLT_MAX)) && (idx == workerIndex*2 || idx == workerIndex*2+1)){
                         ray_hit = true;
                         t_max = hit_t;
                         *closest_hit_normal = leaf_hit_normal;
+
+                    }
+                    #pragma unroll
+                    for (int32_t w = 1; w <=2; w *= 2) {
+                        float other_val = __shfl_xor_sync(groupMask, t_max, w);
+                        if (other_val < t_max) {
+                            t_max = other_val;
+                        }
                     }
                 } else {
-                    assert(stack_size < STACK_SIZE);
-                    stack_size = stack_size + 1;
-                    if(workerIndex == 0)
+                    if(workerIndex == 0){
+                        assert(stack_size < STACK_SIZE);
+
                         stack[stack_size] = node.children[i];
+                        //stack_size = stack_size + 1;
+
+                        if(mwgpu_warp_id == 2 && mwgpu_warp_lane == 4){
+                            //mwGPU::HostPrint::log("{} {} {} {} add {}\n",itercount,mwgpu_warp_id,mwgpu_warp_lane,groupMask,stack[stack_size-1]);
+                            //for(int i2=0;i2<stack_size;i2++){
+                            //mwGPU::HostPrint::log("Stack {}: {}\n",i2,stack[i2]);
+                            //}
+                        }
+                    }
+                    stack_size = stack_size + 1;
+                    stack_size = __shfl_sync(groupMask, stack_size, workerBlockIndex * THREADS_PER_RAY);
                 }
             }
-            childNodeCollisionMask << MeshBVH::nodeWidth;
+            childNodeCollisionMask = childNodeCollisionMask >> 1;
         }
     }
 
+    #pragma unroll
+    for (int32_t w = 1; w <=2; w *= 2) {
+        bool other_val = __shfl_xor_sync(groupMask, ray_hit, w);
+        ray_hit |= other_val;
+    }
+
+    //__syncwarp(groupMask);
 
     if (ray_hit && workerIndex == 0) {
         *out_hit_t = t_max;
         *out_hit_normal = *closest_hit_normal;
     }
+
+    //if(mwgpu_warp_id == 2)
+    //    mwGPU::HostPrint::log("Exit {} {} {}\n",mwgpu_warp_id,mwgpu_warp_lane,groupMask);
 
     return ray_hit;
 #else
@@ -212,7 +336,6 @@ bool MeshBVH::traceRay(math::Vector3 ray_o,
 }
 
 bool MeshBVH::traceRayLeaf(int32_t leaf_idx,
-                           int32_t i,
                            RayIsectTxfm tri_isect_txfm,
                            math::Vector3 ray_o,
                            float t_max,
@@ -225,9 +348,11 @@ bool MeshBVH::traceRayLeaf(int32_t leaf_idx,
     Vector3 hit_normal;
     float hit_t;
     bool hit_tri = false;
-    Vector3 a, b, c;
-    bool tri_exists = fetchLeafTriangle(leaf_idx, i, &a, &b, &c);
-    if (tri_exists){
+    for (CountT i = 0; i < MeshBVH::numTrisPerLeaf; i++) {
+        Vector3 a, b, c;
+        bool tri_exists = fetchLeafTriangle(leaf_idx, i, &a, &b, &c);
+        if (!tri_exists) continue;
+
         bool intersects = rayTriangleIntersection(
             a, b, c,
             tri_isect_txfm.kx,  tri_isect_txfm.ky, tri_isect_txfm.kz, 

@@ -3,6 +3,10 @@
 #include <madrona/types.hpp>
 #include <madrona/geo.hpp>
 
+#ifdef MADRONA_GPU_MODE
+#include <madrona/mw_gpu/host_print.hpp>
+#endif
+
 namespace madrona::phys {
 
 enum class CollisionFlags : uint64_t {
@@ -89,6 +93,14 @@ struct MeshBVH {
         float *out_hit_t,
         math::Vector3 *out_hit_normal) const;
 
+    inline bool traceRayLeafIndexed(int32_t leaf_idx,
+                           int32_t i,
+                           MeshBVH::RayIsectTxfm tri_isect_txfm,
+                           math::Vector3 ray_o,
+                           float t_max,
+                           float *out_hit_t,
+                           math::Vector3 *out_hit_normal) const;
+
     inline bool rayTriangleIntersection(
         math::Vector3 tri_a, math::Vector3 tri_b, math::Vector3 tri_c,
         int32_t kx, int32_t ky, int32_t kz,
@@ -143,4 +155,4 @@ struct MeshBVH {
 
 }
 
-#include "mesh_bvh.inl"
+#include "mesh_bvh2.inl"
