@@ -1,5 +1,15 @@
 namespace madrona::phys {
 
+constexpr int SHARED_STACK_SIZE = 6;
+
+#ifdef MADRONA_GPU_MODE
+    #define STACK_POP(X) { --stack_size; if (stack_size < SHARED_STACK_SIZE) X = shared_stack[stack_size]; else X = stack[stack_size - SHARED_STACK_SIZE]; }
+    #define STACK_PUSH(X) { if (stack_size < SHARED_STACK_SIZE) shared_stack[stack_size] = X; else stack[stack_size - SHARED_STACK_SIZE] = X; stack_size++; }
+#else
+    #define STACK_POP(X) {X = stack[--stack_size];}
+    #define STACK_PUSH(X) { stack[stack_size++] = X; }
+#endif
+
 bool MeshBVH2::Node::isLeaf(madrona::CountT child) const
 {
     return children[child] & 0x80000000;
@@ -98,11 +108,24 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
     stack[0] = 0;
     CountT stack_size = 1;
 
+#ifdef MADRONA_GPU_MODE
+    const int32_t mwgpu_warp_id = threadIdx.x / 32;
+    const int32_t mwgpu_warp_lane = threadIdx.x % 32;
+    const int32_t num_smem_bytes_per_warp =
+        (mwGPU::SharedMemStorage::numBytesPerWarp()/4)*4;
+
+    auto sharedMem = ((char*)mwGPU::SharedMemStorage::buffer) + mwgpu_warp_id * num_smem_bytes_per_warp +
+            SHARED_STACK_SIZE * sizeof(int32_t) * mwgpu_warp_lane;
+    int32_t* shared_stack = (int32_t*)sharedMem;
+    shared_stack[0] = 0;
+#endif
+
     bool ray_hit = false;
     Vector3 closest_hit_normal = Vector3{0,0,0};
 
     while (stack_size > 0) { 
-        int32_t node_idx = stack[--stack_size];
+        int32_t node_idx;
+        STACK_POP(node_idx);
         const Node &node = nodes[node_idx];
 
         float rayXInv = copysignf(ray_d.x == 0 ? 1/diveps : 1/ray_d.x,ray_d.x);
@@ -200,7 +223,7 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
                     }
                 } else {
                     assert(stack_size < 32);
-                    stack[stack_size++] = node.children[i];
+                    STACK_PUSH(node.children[i]);
                 }
             }
         }
