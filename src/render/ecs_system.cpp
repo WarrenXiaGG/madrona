@@ -196,6 +196,9 @@ void registerTypes(ECSRegistry &registry,
     registry.registerComponent<InstanceData>();
     registry.registerComponent<MortonCode>();
 
+    registry.registerComponent<RenderOutput>();
+    registry.registerComponent<BVHModel>();
+
 
     // Pointers get set in RenderingSystem::init
     if (bridge) {

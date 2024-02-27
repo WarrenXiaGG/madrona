@@ -117,6 +117,12 @@ extern "C" __global__ void initBVHParams(madrona::BVHParams *params,
     params->mortonCodes = (uint32_t *)mgr->getArchetypeComponent<
         RenderableArchetype, MortonCode>();
 
+    params->bvhModels = (render::BVHModel *)mgr->getArchetypeComponent<
+        RenderableArchetype, render::BVHModel>();
+
+    params->renderOutput = (render::RenderOutput *)mgr->getArchetypeComponent<
+        RenderCameraArchetype, render::RenderOutput>();
+
     params->internalData = (BVHInternalData *)internal_data;
 
     params->hostAllocator = (void *)host_alloc;

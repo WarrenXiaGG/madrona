@@ -50,18 +50,28 @@ struct alignas(16) InstanceData {
     int32_t worldIDX;
 };
 
+struct RenderOutput {
+    uint8_t output[64][64][3];
+};
+
+struct BVHModel {
+    void* ptr;
+};
+
 // For private usage - not to be used by user.
 struct RenderableArchetype : public Archetype<
     InstanceData,
 
     // For BVH support, we need to sort these not just be world ID,
     // but first by morton code too.
-    MortonCode
+    MortonCode,
+    BVHModel
 > {};
 
 // For private usage - not to be used by user.
 struct RenderCameraArchetype : public Archetype<
-    PerspectiveCameraData
+    PerspectiveCameraData,
+    RenderOutput
 > {};
 
 

@@ -62,6 +62,9 @@ struct BVHParams {
     uint32_t *mortonCodes;
     BVHInternalData *internalData;
 
+    render::BVHModel* bvhModels;
+    render::RenderOutput* renderOutput;
+
     // These are all going to be inherited from the ECS
     void *hostAllocator;
     void *tmpAllocator;

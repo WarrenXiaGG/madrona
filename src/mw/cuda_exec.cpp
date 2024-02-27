@@ -954,7 +954,7 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
         "-lto"
     };
 
-    if (force_debug_env[0] == '1') {
+    if (force_debug_env != nullptr && force_debug_env[0] == '1') {
         linker_flags.push_back("-g");
     }
 
@@ -1012,7 +1012,7 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
         "-arch", gpu_arch_str.c_str(),
     };
 
-    if (force_debug_env[0] == '1') {
+    if (force_debug_env != nullptr && force_debug_env[0] == '1') {
         common_compile_flags.push_back("--device-debug");
     }
 
@@ -1993,7 +1993,7 @@ static CUgraphExec makeTaskGraphRunGraph(
                                     &alloc_node, 1, 
                                     &bvh_launch_params));
 
-#if 1
+#if 0
         // Optimize LBVH build node
         const uint32_t num_blocks_per_sm_opt_build = 16;
         bvh_launch_params.func = bvh_kernels.optFast;
@@ -2009,7 +2009,7 @@ static CUgraphExec makeTaskGraphRunGraph(
                                     &bvh_launch_params));
 #endif
 
-#if 1
+#if 0
         // Debug node
         bvh_launch_params.func = bvh_kernels.debug;
         bvh_launch_params.gridDimX = 1;
@@ -2022,14 +2022,24 @@ static CUgraphExec makeTaskGraphRunGraph(
                                     &bvh_launch_params));
 #endif
 
-        bvh_launch_params.func = bvh_kernels.raycast;
-        bvh_launch_params.gridDimX = 1;
-        bvh_launch_params.blockDimX = 1;
-        bvh_launch_params.sharedMemBytes = 0;
+        const uint32_t num_blocks_per_sm_fast_raycast = 16;
+        CUDA_KERNEL_NODE_PARAMS bvh_launch_params2 = {
+            .func = bvh_kernels.raycast,
+            .gridDimX = bvh_kernels.numSMs * num_blocks_per_sm_fast_raycast,
+            .gridDimY = 4,
+            .gridDimZ = 4,
+            .blockDimX = 16,
+            .blockDimY = 16,
+            .blockDimZ = 1,
+            .sharedMemBytes = shared_mem_per_sm /
+                                           num_blocks_per_sm_fast_raycast,
+            .kernelParams = nullptr,
+            .extra = nullptr
+        };
         CUgraphNode raycast_node;
         REQ_CU(cuGraphAddKernelNode(&raycast_node, run_graph,
-                                    &debug_node, 1,
-                                    &bvh_launch_params));
+                                    &build_fast_node, 1,
+                                    &bvh_launch_params2));
     }
 #endif
 
