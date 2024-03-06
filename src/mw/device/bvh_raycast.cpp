@@ -1,7 +1,7 @@
 #define MADRONA_MWGPU_MAX_BLOCKS_PER_SM 4
 
 #include <madrona/bvh.hpp>
-#include <madrona/mesh_bvh.hpp>
+#include <madrona/mesh_bvh3.hpp>
 //#include "/home/warrenxia/Desktop/MadronaBVH/madrona_escape_room/external/madrona/src/mw/device/include/madrona/bvh.hpp"
 
 using namespace madrona;
@@ -23,10 +23,9 @@ constexpr int RAYCAST_HEIGHT = 64;
 extern "C" __global__ void bvhRaycastEntry()
 {
     const int32_t num_views = bvhParams.numWorlds * 2;
-    const int32_t num_views_per_grid = std::ceil(bvhParams.numWorlds * 2 / (float)gridDim.x);
-
+    const int32_t num_views_per_grid = std::ceil(num_views / (float)gridDim.x);
     int objectRenderIndex = 0;
-    phys::MeshBVH* bvh = (phys::MeshBVH*)bvhParams.bvhModels[objectRenderIndex].ptr;
+    phys::MeshBVH2* bvh = (phys::MeshBVH2*)bvhParams.bvhModels[objectRenderIndex].ptr;
 
     for(int view_i = 0; view_i < num_views_per_grid; view_i++) {
         int view = blockIdx.x * num_views_per_grid + view_i;
@@ -38,13 +37,14 @@ extern "C" __global__ void bvhRaycastEntry()
 
         math::Quat rot = bvhParams.views[view].rotation;
         math::Vector3 ray_start = bvhParams.views[view].position;
-        math::Vector3 look_at = rot.rotateVec({0, 1, 0});
+        math::Vector3 look_at = rot.inv().rotateVec({0, 1, 0});
+
         constexpr float theta = 1.5708f;
         const float h = tanf(theta / 2);
         const auto viewport_height = 2 * h;
         const auto viewport_width = viewport_height;
         const auto forward = look_at.normalize();
-        auto u = rot.rotateVec({1, 0, 0});
+        auto u = rot.inv().rotateVec({1, 0, 0});
         auto v = cross(forward, u).normalize();
         auto horizontal = u * viewport_width;
         auto vertical = v * viewport_height;
@@ -61,7 +61,7 @@ extern "C" __global__ void bvhRaycastEntry()
             float t;
             math::Vector3 normal = {u * 2 - 1, v * 2 - 1, 0};
             normal = ray_dir;
-            bool hit = bvh->traceRay(ray_start, ray_dir, &t, &normal);
+            bool hit = bvh->traceRay(ray_start, ray_dir, &t, &normal,0);
             if (hit && subthread == 0) {
                 bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][0] = (normal.x * 0.5f + 0.5f) * 255;
                 bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][1] = (normal.y * 0.5f + 0.5f) * 255;
