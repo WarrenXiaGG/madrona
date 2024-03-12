@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdio>
 
 namespace madrona::phys {
 
@@ -94,12 +95,12 @@ bool MeshBVH::traceRay(math::Vector3 ray_o,
 {
     using namespace math;
 
+    static constexpr float epsilon = 0.00001f;
+
     Diag3x3 inv_d = Diag3x3::fromVec(ray_d).inv();
 
-    math::AABB root_aabb = rootAABB.applyTRS(txfm.pos, txfm.rot, txfm.scale);
-
     RayIsectTxfm tri_isect_txfm =
-        computeRayIsectTxfm(ray_o, ray_d, inv_d, root_aabb);
+        computeRayIsectTxfm(ray_o, ray_d, inv_d, rootAABB);
 
     uint32_t previous_stack_size = stack->size;
 
@@ -444,6 +445,7 @@ bool MeshBVH::rayTriangleIntersection(
     *out_hit_t = T * rcpDet;
 
     // FIXME better way to get geo normal?
+
     *out_hit_normal = normalize(cross(B - A, C - A));
 
     return true;
@@ -465,6 +467,10 @@ bool MeshBVH::fetchLeafTriangle(CountT leaf_idx,
     int16_t c_diff = int16_t(packed & 0xFFFF);
     uint32_t b_idx = uint32_t((int32_t)a_idx + b_diff);
     uint32_t c_idx = uint32_t((int32_t)a_idx + c_diff);
+
+    assert(a_idx < numVerts);
+    assert(b_idx < numVerts);
+    assert(c_idx < numVerts);
 
     *a = vertices[a_idx];
     *b = vertices[b_idx];

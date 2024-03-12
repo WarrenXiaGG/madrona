@@ -11,6 +11,7 @@
 #include <madrona/bvh.hpp>
 #include <madrona/math.hpp>
 #include <madrona/memory.hpp>
+#include <madrona/mesh_bvh.hpp>
 
 using namespace madrona;
 
@@ -154,6 +155,14 @@ extern "C" __global__ void bvhAllocInternalNodes()
 #endif
     }
 #endif
+
+    for (int i = 0; i < 10; ++i) {
+        render::BVHModel *model = &bvhParams.bvhModels[i];
+        phys::MeshBVH *mesh_bvh = (phys::MeshBVH *)model->ptr;
+
+        printf("%f %f %f\n", mesh_bvh->vertices[i].x,
+                mesh_bvh->vertices[i].z, mesh_bvh->vertices[i].z);
+    }
 }
 
 namespace bits {

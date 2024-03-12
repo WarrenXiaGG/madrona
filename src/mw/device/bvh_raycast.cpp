@@ -24,12 +24,26 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                                     uint32_t view_idx,
                                     uint32_t pixel_x, uint32_t pixel_y,
                                     const math::Vector3 &ray_o,
-                                    const math::Vector3 &ray_d,
+                                    math::Vector3 ray_d,
                                     float *out_hit_t,
                                     math::Vector3 *out_hit_normal,
                                     float t_max)
 {
 #define INSPECT(...) if (pixel_x == 32 && pixel_y == 32) { printf(__VA_ARGS__); }
+
+    static constexpr float epsilon = 0.00001f;
+
+    if (ray_d.x == 0.f) {
+        ray_d.x += epsilon;
+    }
+
+    if (ray_d.y == 0.f) {
+        ray_d.y += epsilon;
+    }
+
+    if (ray_d.z == 0.f) {
+        ray_d.z += epsilon;
+    }
 
     using namespace madrona::math;
 
@@ -91,19 +105,16 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     4.0f, t_max, aabb_hit_t, aabb_far_t);
 
             if (aabb_hit_t <= t_max) {
+#if 0
                 INSPECT("(%d %d) Hit an AABB (%d)\n", pixel_x, pixel_y, 
                         children_indices[i]);
+#endif
 
                 // If the near T of the box intersection happens before the closest
                 // intersection we got thus far, try tracing through.
 
                 if (child_is_leaf) {
-                    ray_hit = true;
-                    t_max = aabb_hit_t;
-                    closest_hit_normal = { 1.f, 0.f, 0.f };
-
-#if 0
-                    INSPECT("Tracing through child %d\n", child_node_idx);
+#if 1
 
                     // Child node idx is the index of the mesh bvh
                     // LBVHNode *leaf_node = &leaves[child_node_idx];
@@ -126,15 +137,31 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                         instance_data->scale
                     };
 
-                    bool leaf_hit = model_bvh->traceRay(ray_o, ray_d, &hit_t,
+                    Vector3 txfm_ray_o = instance_data->scale.inv() *
+                        instance_data->rotation.inv().rotateVec(
+                            (ray_o - instance_data->position));
+
+                    Vector3 txfm_ray_d = instance_data->scale.inv() *
+                        instance_data->rotation.inv().rotateVec(ray_d);
+
+                    float t_scale = txfm_ray_d.length();
+
+                    txfm_ray_d /= t_scale;
+
+                    INSPECT("bvh vertices at : %p\n", model_bvh->vertices);
+
+                    bool leaf_hit = model_bvh->traceRay(txfm_ray_o, txfm_ray_d, &hit_t,
                             &leaf_hit_normal, &stack, txfm, t_max);
 
                     if (leaf_hit) {
-                        INSPECT("hit\n");
+                        // INSPECT("hit\n");
 
                         ray_hit = true;
-                        t_max = hit_t;
-                        closest_hit_normal = leaf_hit_normal;
+                        t_max = hit_t * t_scale;
+
+                        closest_hit_normal = instance_data->rotation.rotateVec(
+                                instance_data->scale * leaf_hit_normal);
+                        closest_hit_normal.normalize();
                     }
 #endif
                 } else {

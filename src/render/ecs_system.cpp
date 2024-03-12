@@ -104,7 +104,7 @@ inline void instanceTransformUpdate(Context &ctx,
 
     ctx.get<TLBVHNode>(renderable.renderEntity).aabb = aabb;
 
-#if 1
+#if 0
     printf("(%d) %f %f %f -> %f %f %f (position is %f %f %f)\n",
             renderable.renderEntity.id,
             aabb.pMin.x, aabb.pMin.y, aabb.pMin.z,
