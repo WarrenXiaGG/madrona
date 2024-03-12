@@ -104,12 +104,12 @@ inline void instanceTransformUpdate(Context &ctx,
 
     ctx.get<TLBVHNode>(renderable.renderEntity).aabb = aabb;
 
-#if 0
-    printf("(%d) %f %f %f -> %f %f %f (scale is %f %f %f)\n",
+#if 1
+    printf("(%d) %f %f %f -> %f %f %f (position is %f %f %f)\n",
             renderable.renderEntity.id,
             aabb.pMin.x, aabb.pMin.y, aabb.pMin.z,
             aabb.pMax.x, aabb.pMax.y, aabb.pMax.z,
-            data.scale.d0, data.scale.d1, data.scale.d2);
+            pos.x, pos.y, pos.z);
 #endif
 }
 

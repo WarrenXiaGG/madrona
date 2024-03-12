@@ -513,7 +513,8 @@ extern "C" __global__ void bvhConstructAABBs()
         current->aabb = merged_aabb;
 
         if (current->parent == 0xFFFF'FFFF) {
-            printf("%f %f %f -> %f %f %f\n",
+            printf("%p, %f %f %f -> %f %f %f\n",
+                    current,
                     merged_aabb.pMin.x, merged_aabb.pMin.y, merged_aabb.pMin.z,
                     merged_aabb.pMax.x, merged_aabb.pMax.y, merged_aabb.pMax.z);
 

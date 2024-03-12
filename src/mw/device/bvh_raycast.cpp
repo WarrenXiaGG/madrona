@@ -21,12 +21,16 @@ constexpr int RAYCAST_HEIGHT = 64;
 
 // Trace a ray through the top level structure.
 static __device__ bool traceRayTLAS(uint32_t world_idx,
+                                    uint32_t view_idx,
+                                    uint32_t pixel_x, uint32_t pixel_y,
                                     const math::Vector3 &ray_o,
                                     const math::Vector3 &ray_d,
                                     float *out_hit_t,
                                     math::Vector3 *out_hit_normal,
                                     float t_max)
 {
+#define INSPECT(...) if (pixel_x == 32 && pixel_y == 32) { printf(__VA_ARGS__); }
+
     using namespace madrona::math;
 
     BVHInternalData *internal_data = bvhParams.internalData;
@@ -84,14 +88,23 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
             float aabb_hit_t, aabb_far_t;
             Diag3x3 inv_ray_d = { 1.f/ray_d.x, 1.f/ray_d.y, 1.f/ray_d.z };
             bool intersect_aabb = child_aabb.rayIntersects(ray_o, inv_ray_d,
-                    0.f, t_max, aabb_hit_t, aabb_far_t);
-
+                    4.0f, t_max, aabb_hit_t, aabb_far_t);
 
             if (aabb_hit_t <= t_max) {
+                INSPECT("(%d %d) Hit an AABB (%d)\n", pixel_x, pixel_y, 
+                        children_indices[i]);
+
                 // If the near T of the box intersection happens before the closest
                 // intersection we got thus far, try tracing through.
 
                 if (child_is_leaf) {
+                    ray_hit = true;
+                    t_max = aabb_hit_t;
+                    closest_hit_normal = { 1.f, 0.f, 0.f };
+
+#if 0
+                    INSPECT("Tracing through child %d\n", child_node_idx);
+
                     // Child node idx is the index of the mesh bvh
                     // LBVHNode *leaf_node = &leaves[child_node_idx];
 
@@ -113,22 +126,24 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                         instance_data->scale
                     };
 
-#if 1
                     bool leaf_hit = model_bvh->traceRay(ray_o, ray_d, &hit_t,
                             &leaf_hit_normal, &stack, txfm, t_max);
-#endif
 
                     if (leaf_hit) {
+                        INSPECT("hit\n");
+
                         ray_hit = true;
                         t_max = hit_t;
                         closest_hit_normal = leaf_hit_normal;
                     }
+#endif
                 } else {
                     assert(stack.size < phys::TraversalStack::stackSize);
-                    stack.push(child_node_idx);
+
+                    stack.push(children_indices[i]);
                 }
             } else {
-                printf("ray failed intersection\n");
+                // printf("ray failed intersection\n");
             }
         }
 #endif
@@ -198,7 +213,10 @@ extern "C" __global__ void bvhRaycastEntry()
         normal = ray_dir;
 
         // For now, just hack in a t_max of 10000.
-        bool hit = traceRayTLAS(world_idx, ray_start, ray_dir, 
+        bool hit = traceRayTLAS(
+                world_idx, current_view_offset, 
+                pixel_x, pixel_y,
+                ray_start, ray_dir, 
                 &t, &normal, 10000.f);
 
         if (hit) {
