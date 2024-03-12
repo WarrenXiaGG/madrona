@@ -13,6 +13,24 @@ struct CollisionMaterial {
     CollisionFlags flags;
 };
 
+struct TraversalStack {
+    static constexpr CountT stackSize = 40;
+
+    int32_t s[stackSize];
+    CountT size;
+
+    // if def for the shared version
+    void push(int32_t v)
+    {
+        s[size++] = v;
+    }
+
+    int32_t pop()
+    {
+        return s[--size];
+    }
+};
+
 struct MeshBVH {
     static constexpr inline CountT numTrisPerLeaf = 8;
     static constexpr inline CountT nodeWidth = 4;
@@ -75,6 +93,21 @@ struct MeshBVH {
                          math::Vector3 *out_hit_normal,
                          float t_max = float(FLT_MAX)) const;
 
+    // Apply this transform onto the root AABB
+    struct AABBTransform {
+        math::Vector3 pos;
+        math::Quat rot;
+        math::Diag3x3 scale;
+    };
+
+    inline bool traceRay(math::Vector3 ray_o,
+                         math::Vector3 ray_d,
+                         float *out_hit_t,
+                         math::Vector3 *out_hit_normal,
+                         TraversalStack *stack,
+                         const AABBTransform &txfm,
+                         float t_max = float(FLT_MAX)) const;
+
     inline float sphereCast(math::Vector3 ray_o,
                             math::Vector3 ray_d,
                             float sphere_r,
@@ -105,7 +138,8 @@ struct MeshBVH {
                                   math::Vector3 *c) const;
 
     inline RayIsectTxfm computeRayIsectTxfm(
-        math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d) const;
+        math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d,
+        const math::AABB &root_aabb) const;
 
     inline bool sphereCastNodeCheck(math::Vector3 ray_o,
                                     math::Diag3x3 inv_d,

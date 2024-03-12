@@ -58,6 +58,11 @@ struct BVHModel {
     void* ptr;
 };
 
+// Top level acceleration structure node
+struct TLBVHNode {
+    math::AABB aabb;
+};
+
 // For private usage - not to be used by user.
 struct RenderableArchetype : public Archetype<
     InstanceData,
@@ -65,7 +70,9 @@ struct RenderableArchetype : public Archetype<
     // For BVH support, we need to sort these not just be world ID,
     // but first by morton code too.
     MortonCode,
-    BVHModel
+    BVHModel,
+
+    TLBVHNode
 > {};
 
 // For private usage - not to be used by user.

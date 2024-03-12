@@ -5,27 +5,50 @@
 
 namespace madrona {
 
-#if 0
-// Negative node indices are for leaves
-struct LBVHNode {
-    int32_t left;
-    int32_t right;
-    int32_t parent;
-};
-
-struct LeafNode {
-    AABB aabb;
-    int32_t parent;
-};
-#endif
-
 // This isn't going to be the representation that actually gets traversed
 // through. This is just for construction purposes.
 struct LBVHNode {
+    // The indices stored in here actually start at 1, not 0. This is because
+    // 0 is reserved for invalid nodes.
+
     int32_t left;
     int32_t right;
-    int32_t parent;
+
+    uint32_t instanceIdx;
+
+    // If this is 0xFFFFFFFF, this is the root. Index starts at 0.
+    uint32_t parent;
     math::AABB aabb;
+
+    AtomicU32 reachedCount;
+
+    // If both left and right are -1, then the node is invalid.
+    // However, if just one of them is negative, then the negative index
+    // is actually an index into the leaf nodes buffer.
+    inline bool isInvalid()
+    {
+        return left == -1 && right == -1;
+    }
+
+    static inline int32_t childIdxToStoreIdx(int32_t idx, bool is_leaf)
+    {
+        if (is_leaf) {
+            return -(idx + 1);
+        } else {
+            return idx + 1;
+        }
+    }
+
+    static inline int32_t storeIdxToChildIdx(int32_t idx, bool &is_leaf)
+    {
+        if (idx < 0) {
+            is_leaf = true;
+            return (-idx) - 1;
+        } else {
+            is_leaf = false;
+            return idx - 1;
+        }
+    }
 };
 
 // These have to be in global memory
@@ -50,15 +73,18 @@ struct BVHInternalData {
 
     AtomicU32 buildFastAccumulator;
     AtomicU32 optFastAccumulator;
+    AtomicU32 constructAABBsAccumulator;
 };
 
 struct BVHParams {
     uint32_t numWorlds;
     render::InstanceData *instances;
     render::PerspectiveCameraData *views;
+    render::TLBVHNode *aabbs;
     int32_t *instanceOffsets;
     int32_t *instanceCounts;
     int32_t *viewOffsets;
+    int32_t *viewCounts;
     uint32_t *mortonCodes;
     BVHInternalData *internalData;
 

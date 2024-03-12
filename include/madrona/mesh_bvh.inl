@@ -1,3 +1,5 @@
+#include <cassert>
+
 namespace madrona::phys {
 
 bool MeshBVH::Node::isLeaf(madrona::CountT child) const
@@ -86,13 +88,118 @@ bool MeshBVH::traceRay(math::Vector3 ray_o,
                        math::Vector3 ray_d,
                        float *out_hit_t,
                        math::Vector3 *out_hit_normal,
+                       TraversalStack *stack,
+                       const AABBTransform &txfm,
                        float t_max) const
 {
     using namespace math;
 
     Diag3x3 inv_d = Diag3x3::fromVec(ray_d).inv();
 
-    RayIsectTxfm tri_isect_txfm = computeRayIsectTxfm(ray_o, ray_d, inv_d);
+    math::AABB root_aabb = rootAABB.applyTRS(txfm.pos, txfm.rot, txfm.scale);
+
+    RayIsectTxfm tri_isect_txfm =
+        computeRayIsectTxfm(ray_o, ray_d, inv_d, root_aabb);
+
+    uint32_t previous_stack_size = stack->size;
+
+    stack->push(0);
+
+    bool ray_hit = false;
+    Vector3 closest_hit_normal;
+
+    while (stack->size > previous_stack_size) {
+        int32_t node_idx = stack->pop();
+
+        const Node &node = nodes[node_idx];
+        for (CountT i = 0; i < MeshBVH::nodeWidth; i++) {
+            if (!node.hasChild(i)) {
+                continue; // Technically this could be break?
+            };
+
+            madrona::math::AABB child_aabb {
+                .pMin = {
+                    node.minX[i],
+                    node.minY[i],
+                    node.minZ[i],
+                },
+                .pMax = {
+                    node.maxX[i],
+                    node.maxY[i],
+                    node.maxZ[i],
+                },
+            };
+
+            float t_near_x = (child_aabb[tri_isect_txfm.nearX] - 
+                              tri_isect_txfm.oNear.x) *
+                                 tri_isect_txfm.invDirNear.x;
+            float t_near_y = (child_aabb[tri_isect_txfm.nearY] -
+                              tri_isect_txfm.oNear.y) *
+                                 tri_isect_txfm.invDirNear.y;
+            float t_near_z = (child_aabb[tri_isect_txfm.nearZ] -
+                              tri_isect_txfm.oNear.z) *
+                                 tri_isect_txfm.invDirNear.z;
+
+            float t_far_x = (child_aabb[tri_isect_txfm.farX] - 
+                              tri_isect_txfm.oFar.x) *
+                                 tri_isect_txfm.invDirFar.x;
+            float t_far_y = (child_aabb[tri_isect_txfm.farY] -
+                              tri_isect_txfm.oFar.y) *
+                                 tri_isect_txfm.invDirFar.y;
+            float t_far_z = (child_aabb[tri_isect_txfm.farZ] -
+                              tri_isect_txfm.oFar.z) *
+                                 tri_isect_txfm.invDirFar.z;
+
+            float t_near = fmaxf(t_near_x, fmaxf(t_near_y,
+                fmaxf(t_near_z, 0.f)));
+            float t_far = fminf(t_far_x, fminf(t_far_y,
+                fminf(t_far_z, t_max)));
+
+            if (t_near <= t_far) {
+                if (node.isLeaf(i)) {
+                    int32_t leaf_idx = node.leafIDX(i);
+                    
+                    float hit_t;
+                    Vector3 leaf_hit_normal;
+                    bool leaf_hit = traceRayLeaf(leaf_idx, tri_isect_txfm,
+                        ray_o, t_max, &hit_t, &leaf_hit_normal);
+
+                    if (leaf_hit) {
+                        ray_hit = true;
+                        t_max = hit_t;
+                        closest_hit_normal = leaf_hit_normal;
+                    }
+                } else {
+                    assert(stack->size < TraversalStack::stackSize);
+                    stack->push(node.children[i]);
+                }
+            }
+        }
+    }
+
+    assert(stack->size == previous_stack_size);
+
+    if (!ray_hit) {
+        return false;
+    }
+    
+    *out_hit_t = t_max;
+    *out_hit_normal = closest_hit_normal;
+    return ray_hit;
+}
+
+bool MeshBVH::traceRay(math::Vector3 ray_o,
+                       math::Vector3 ray_d,
+                       float *out_hit_t,
+                       math::Vector3 *out_hit_normal,
+                       float t_max) const
+{
+    using namespace math;
+
+    Diag3x3 inv_d = Diag3x3::fromVec(ray_d).inv();
+
+    RayIsectTxfm tri_isect_txfm = computeRayIsectTxfm(
+            ray_o, ray_d, inv_d, rootAABB);
 
     int32_t stack[32];
     stack[0] = 0;
@@ -367,7 +474,8 @@ bool MeshBVH::fetchLeafTriangle(CountT leaf_idx,
 }
 
 MeshBVH::RayIsectTxfm MeshBVH::computeRayIsectTxfm(
-    math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d) const
+    math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d,
+    const math::AABB &root_aabb) const
 {
     // Woop et al 2013
     float abs_x = fabsf(d.x);
@@ -444,8 +552,8 @@ MeshBVH::RayIsectTxfm MeshBVH::computeRayIsectTxfm(
 
     constexpr float eps = 2.98023224e-7f;
 
-    math::Vector3 lower = o - rootAABB.pMin;
-    math::Vector3 upper = o - rootAABB.pMax;
+    math::Vector3 lower = o - root_aabb.pMin;
+    math::Vector3 upper = o - root_aabb.pMax;
 
     lower.x = dnPos(fabsf(lower.x));
     lower.y = dnPos(fabsf(lower.y));

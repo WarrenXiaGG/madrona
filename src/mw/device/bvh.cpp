@@ -29,6 +29,13 @@ struct BuildFastBuffer {
     char buffer[1];
 };
 
+struct ConstructAABBBuffer {
+    uint32_t blockNodeOffset;
+    uint32_t totalNumInstances;
+
+    char buffer[1];
+};
+
 // For optimizing the initial BVH build with treelet rotations.
 struct OptFastBuffer {
     uint32_t blockNodeOffset;
@@ -97,6 +104,7 @@ extern "C" __global__ void bvhAllocInternalNodes()
     internal_data->internalNodes = (LBVHNode *)ptr;
     internal_data->numAllocatedNodes = num_required_nodes;
     internal_data->buildFastAccumulator.store_relaxed(0);
+    internal_data->constructAABBsAccumulator.store_relaxed(0);
 
     internal_data->leaves = (LBVHNode *)((char *)ptr +
             num_required_nodes * sizeof(LBVHNode));
@@ -243,12 +251,19 @@ extern "C" __global__ void bvhBuildFast()
     // Both the nodes and the leaves use the same offset
     LBVHNode *nodes = internal_data->internalNodes +
                       world_info.internalNodesOffset;
-    LBVHNode *leaves = internal_data->internalNodes + 
+    LBVHNode *leaves = internal_data->leaves + 
                        world_info.internalNodesOffset;
 
+    nodes[tn_offset].left = 0;
+    nodes[tn_offset].right = 0;
+    nodes[tn_offset].parent = 0;
+
+    if (tn_offset == 0) {
+        nodes[tn_offset].parent = 0xFFFF'FFFF;
+        printf("Root at %p\n", &nodes[tn_offset]);
+    }
+
     if (tn_offset >= world_info.numInternalNodes) {
-        nodes[tn_offset].left = -1;
-        nodes[tn_offset].right = -1;
         return;
     }
 
@@ -294,7 +309,7 @@ extern "C" __global__ void bvhBuildFast()
 
     int32_t other_end = tn_offset + true_length * direction;
 
-#if defined (MADRONA_DEBUG_TEST) && 0
+#if defined (MADRONA_DEBUG_TEST)
     printf("tn_offset %d: direction=%d = %d - %d | true_length %d | other_end %d\n", 
             tn_offset, direction,
             llcp_nodes(tn_offset, tn_offset+1),
@@ -325,32 +340,196 @@ extern "C" __global__ void bvhBuildFast()
 
     if (left_index == split_index) {
         // The left node is a leaf and the leaf's index is split_index
-        nodes[tn_offset].left = -split_index;
+        nodes[tn_offset].left = LBVHNode::childIdxToStoreIdx(split_index, true);
+        nodes[tn_offset].reachedCount.store_relaxed(0);
 
-        // TODO: Calculate the AABB
-        leaves[split_index].aabb = {};
+        if (tn_offset == 0) {
+            printf("REAL Parent is root! %p\n", &leaves[split_index]);
+        }
+
         leaves[split_index].parent = tn_offset;
+        uint32_t instance_idx = (leaves[split_index].instanceIdx = split_index +
+            world_info.internalNodesOffset);
+
+        leaves[split_index].aabb = bvhParams.aabbs[instance_idx].aabb;
+        leaves[split_index].reachedCount.store_relaxed(0);
     } else {
         // The left node is an internal node and its index is split_index
-        nodes[tn_offset].left = split_index;
+        nodes[tn_offset].left = LBVHNode::childIdxToStoreIdx(split_index, false);
+        nodes[tn_offset].reachedCount.store_relaxed(0);
+        nodes[split_index].parent = tn_offset;
+
+        if (tn_offset == 0) {
+            printf("REAL Parent is root! %p\n", &nodes[split_index]);
+        }
     }
     
     if (right_index == split_index + 1) {
         // The right node is a leaf and the leaf's index is split_index+1
-        nodes[tn_offset].right = -(split_index+1);
+        nodes[tn_offset].right = LBVHNode::childIdxToStoreIdx(split_index + 1, true);
+        nodes[tn_offset].reachedCount.store_relaxed(0);
 
-        // TODO: Calculate the AABB
-        leaves[split_index+1].aabb = {};
         leaves[split_index+1].parent = tn_offset;
+        uint32_t instance_idx = (leaves[split_index+1].instanceIdx = split_index + 1 +
+            world_info.internalNodesOffset);
+        leaves[split_index+1].aabb = bvhParams.aabbs[instance_idx].aabb;
+        leaves[split_index+1].reachedCount.store_relaxed(0);
+
+        if (tn_offset == 0) {
+            printf("REAL Parent is root! %p\n", &leaves[split_index+1]);
+        }
     } else {
         // The right node is an internal node and its index is split_index+1
-        nodes[tn_offset].right = split_index+1;
+        nodes[tn_offset].right = LBVHNode::childIdxToStoreIdx(split_index + 1, false);
+        nodes[tn_offset].reachedCount.store_relaxed(0);
+        nodes[split_index + 1].parent = tn_offset;
+
+        if (tn_offset == 0) {
+            printf("REAL Parent is root! %p\n", &nodes[split_index+1]);
+        }
+    }
+}
+
+// Constructs the internal nodes' AABBs
+//
+// TODO: Create outer loop for persistent threads.
+extern "C" __global__ void bvhConstructAABBs()
+{
+    BVHInternalData *internal_data = bvhParams.internalData;
+    sm::ConstructAABBBuffer *smem = (sm::ConstructAABBBuffer *)sm::buffer;
+
+    const uint32_t threads_per_block = blockDim.x;
+
+    if (threadIdx.x == 0) {
+        uint32_t node_offset = internal_data->constructAABBsAccumulator.fetch_add<
+            sync::memory_order::relaxed>(threads_per_block);
+        uint32_t num_instances = bvhParams.instanceOffsets[bvhParams.numWorlds-1] +
+                                 bvhParams.instanceCounts[bvhParams.numWorlds-1];
+
+        smem->blockNodeOffset = node_offset;
+        smem->totalNumInstances = num_instances;
+    }
+
+    __syncthreads();
+
+    uint32_t thread_offset = smem->blockNodeOffset + threadIdx.x;
+
+    if (thread_offset >= smem->totalNumInstances) {
+        return;
+    }
+
+    struct {
+        uint32_t idx;
+        uint32_t numInternalNodes;
+        uint32_t internalNodesOffset;
+        uint32_t numLeaves;
+    } world_info;
+
+    world_info.idx = bvhParams.instances[thread_offset].worldIDX;
+    world_info.numLeaves = bvhParams.instanceCounts[world_info.idx];
+    world_info.numInternalNodes = world_info.numLeaves - 1;
+    world_info.internalNodesOffset = bvhParams.instanceOffsets[world_info.idx];
+
+    int32_t tn_offset = thread_offset - world_info.internalNodesOffset;
+
+    LBVHNode *internal_nodes = internal_data->internalNodes +
+                               world_info.internalNodesOffset;
+    LBVHNode *leaves = internal_data->leaves +
+                       world_info.internalNodesOffset;
+
+    LBVHNode *current = &leaves[tn_offset];
+
+    if (current->isInvalid() || tn_offset >= world_info.numLeaves) {
+        return;
+    }
+
+    current = &internal_nodes[current->parent];
+
+    // If the value before the add is 0, then we are the first to hit this node.
+    // => we need to break out of the loop.
+    while (current->reachedCount.fetch_add_release(1) == 1) {
+        if (current->parent == 0) {
+            printf("Parent is root! %p (%p)\n", current, internal_nodes);
+        }
+
+        // Merge the AABBs of the children nodes. (Store like this for now to
+        // help when we make the tree 4 wide or 8 wide.
+        LBVHNode *children[2];
+        bool are_leaves[2];
+
+        if (current->left == 0) {
+            children[0] = nullptr;
+        } else {
+            bool is_leaf;
+            int32_t node_idx = LBVHNode::storeIdxToChildIdx(
+                    current->left, is_leaf);
+
+            if (is_leaf) {
+                children[0] = &leaves[node_idx];
+                are_leaves[0] = true;
+            } else {
+                children[0] = &internal_nodes[node_idx];
+                are_leaves[0] = false;
+            }
+        }
+
+        if (current->right == 0) {
+            children[1] = nullptr;
+        } else {
+            bool is_leaf;
+            int32_t node_idx = LBVHNode::storeIdxToChildIdx(
+                    current->right, is_leaf);
+
+            if (is_leaf) {
+                children[1] = &leaves[node_idx];
+                are_leaves[1] = true;
+            } else {
+                children[1] = &internal_nodes[node_idx];
+                are_leaves[1] = false;
+            }
+        }
+
+        bool got_valid_node = false;
+        math::AABB merged_aabb;
+
+        // Merge the AABBs
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            LBVHNode *node = children[i];
+
+
+            if (node) {
+                if (!got_valid_node) {
+                    got_valid_node = true;
+                    merged_aabb = node->aabb;
+                } else {
+                    merged_aabb = math::AABB::merge(node->aabb, merged_aabb);
+#if 1
+#endif
+                }
+            }
+        }
+
+        current->aabb = merged_aabb;
+
+        if (current->parent == 0xFFFF'FFFF) {
+            printf("%f %f %f -> %f %f %f\n",
+                    merged_aabb.pMin.x, merged_aabb.pMin.y, merged_aabb.pMin.z,
+                    merged_aabb.pMax.x, merged_aabb.pMax.y, merged_aabb.pMax.z);
+
+            break;
+        } else {
+            // Parent is 0 indexed so no problem just indexing 
+            // at current->parent.
+            current = &internal_nodes[current->parent];
+        }
     }
 }
 
 // Each warp will maintain a single treelet
 extern "C" __global__ void bvhOptimizeLBVH()
 {
+#if 0
     BVHInternalData *internal_data = bvhParams.internalData;
 
     // Phase 1 shared memory layout
@@ -457,10 +636,12 @@ extern "C" __global__ void bvhOptimizeLBVH()
 
     // Now, we post process the treelets so as to just have 7 leaf nodes
     // in the treelet.
+#endif
 }
 
 extern "C" __global__ void bvhDebug()
 {
+#if 0
 #if 1
     BVHInternalData *internal_data = bvhParams.internalData;
 
@@ -476,6 +657,9 @@ extern "C" __global__ void bvhDebug()
         LBVHNode *node = &internal_data->internalNodes[i];
         uint32_t offset = bvhParams.instanceOffsets[instance_data.worldIDX];
 
+        (void)node;
+        (void)offset;
+
 #if 0
         printf("(Internal node %d) %d: left: %d, right: %d\n",
                i - offset,
@@ -483,5 +667,6 @@ extern "C" __global__ void bvhDebug()
                node->left, node->right);
 #endif
     }
+#endif
 #endif
 }

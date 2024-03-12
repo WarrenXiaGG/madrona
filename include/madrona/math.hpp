@@ -322,6 +322,10 @@ struct AABB {
     inline bool rayIntersects(Vector3 ray_o, Diag3x3 inv_ray_d,
                               float ray_t_min, float ray_t_max);
 
+    inline bool rayIntersects(Vector3 ray_o, Diag3x3 inv_ray_d,
+                              float ray_t_min, float ray_t_max,
+                              float &hit_t, float &far_t);
+
     [[nodiscard]] inline AABB applyTRS(const Vector3 &translation,
                                        const Quat &rotation,
                                        const Diag3x3 &scale = {1, 1, 1}) const;

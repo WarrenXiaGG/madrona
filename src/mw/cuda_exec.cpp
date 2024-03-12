@@ -311,6 +311,8 @@ struct BVHKernels {
     CUfunction debug;
 
     CUfunction raycast;
+
+    CUfunction constructAABBs;
 };
 
 struct GPUKernels {
@@ -956,6 +958,7 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
 
     if (force_debug_env != nullptr && force_debug_env[0] == '1') {
         linker_flags.push_back("-g");
+        printf("compiling with debug\n");
     }
 
     nvJitLinkHandle linker;
@@ -1073,6 +1076,10 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
     REQ_CU(cuModuleGetFunction(&bvh_alloc, mod,
                                "bvhAllocInternalNodes"));
 
+    CUfunction bvh_aabbs;
+    REQ_CU(cuModuleGetFunction(&bvh_aabbs, mod,
+                               "bvhConstructAABBs"));
+
     CUfunction bvh_opt;
     REQ_CU(cuModuleGetFunction(&bvh_opt, mod,
                                "bvhOptimizeLBVH"));
@@ -1093,7 +1100,8 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
         .buildFast = bvh_build_fast,
         .optFast = bvh_opt,
         .debug = bvh_debug,
-        .raycast = bvh_raycast_entry
+        .raycast = bvh_raycast_entry,
+        .constructAABBs = bvh_aabbs
     };
 
     return bvh_kernels;
@@ -1993,53 +2001,35 @@ static CUgraphExec makeTaskGraphRunGraph(
                                     &alloc_node, 1, 
                                     &bvh_launch_params));
 
-#if 0
-        // Optimize LBVH build node
-        const uint32_t num_blocks_per_sm_opt_build = 16;
-        bvh_launch_params.func = bvh_kernels.optFast;
-        bvh_launch_params.gridDimX = bvh_kernels.numSMs *
-                                     num_blocks_per_sm_opt_build;
-        bvh_launch_params.blockDimX = 256;
-        bvh_launch_params.sharedMemBytes = shared_mem_per_sm /
-                                           num_blocks_per_sm_opt_build;
+        bvh_launch_params.func = bvh_kernels.constructAABBs;
 
-        CUgraphNode opt_fast_node;
-        REQ_CU(cuGraphAddKernelNode(&opt_fast_node, run_graph,
-                                    &build_fast_node, 1,
+        CUgraphNode construct_aabbs_node;
+        REQ_CU(cuGraphAddKernelNode(&construct_aabbs_node, run_graph,
+                                    &build_fast_node, 1, 
                                     &bvh_launch_params));
-#endif
 
-#if 0
-        // Debug node
-        bvh_launch_params.func = bvh_kernels.debug;
-        bvh_launch_params.gridDimX = 1;
-        bvh_launch_params.blockDimX = 1;
-        bvh_launch_params.sharedMemBytes = 0;
-        
-        CUgraphNode debug_node;
-        REQ_CU(cuGraphAddKernelNode(&debug_node, run_graph,
-                                    &opt_fast_node, 1,
-                                    &bvh_launch_params));
-#endif
+        // We assign a 4x4 region of blocks per image/view
+        // Each block processes 16x16 pixels and we have one thread per pixel.
 
-        const uint32_t num_blocks_per_sm_fast_raycast = 16;
-        CUDA_KERNEL_NODE_PARAMS bvh_launch_params2 = {
+#if 1
+        const uint32_t num_resident_views_per_sm = 4;
+
+        CUDA_KERNEL_NODE_PARAMS bvh_launch_raycast = {
             .func = bvh_kernels.raycast,
-            .gridDimX = bvh_kernels.numSMs * num_blocks_per_sm_fast_raycast,
+            .gridDimX = bvh_kernels.numSMs * num_resident_views_per_sm,
             .gridDimY = 4,
             .gridDimZ = 4,
             .blockDimX = 16,
             .blockDimY = 16,
             .blockDimZ = 1,
-            .sharedMemBytes = shared_mem_per_sm /
-                                           num_blocks_per_sm_fast_raycast,
-            .kernelParams = nullptr,
-            .extra = nullptr
+            .sharedMemBytes = shared_mem_per_sm / num_resident_views_per_sm
         };
+
         CUgraphNode raycast_node;
         REQ_CU(cuGraphAddKernelNode(&raycast_node, run_graph,
-                                    &build_fast_node, 1,
-                                    &bvh_launch_params2));
+                                    &construct_aabbs_node, 1,
+                                    &bvh_launch_raycast));
+#endif
     }
 #endif
 

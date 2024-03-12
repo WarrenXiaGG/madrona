@@ -111,7 +111,13 @@ extern "C" __global__ void initBVHParams(madrona::BVHParams *params,
     params->instanceCounts = (int32_t *)mgr->getArchetypeWorldCounts<
         RenderableArchetype>();
 
+    params->aabbs = (TLBVHNode *)mgr->getArchetypeComponent<
+        RenderableArchetype, TLBVHNode>();
+
     params->viewOffsets = (int32_t *)mgr->getArchetypeWorldOffsets<
+        RenderCameraArchetype>();
+
+    params->viewCounts = (int32_t *)mgr->getArchetypeWorldCounts<
         RenderCameraArchetype>();
 
     params->mortonCodes = (uint32_t *)mgr->getArchetypeComponent<

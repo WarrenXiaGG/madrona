@@ -1,3 +1,4 @@
+#include <madrona/mesh_bvh.hpp>
 #include <madrona/render/ecs.hpp>
 #include <madrona/components.hpp>
 #include <madrona/context.hpp>
@@ -91,6 +92,25 @@ inline void instanceTransformUpdate(Context &ctx,
     data.scale = scale;
     data.worldIDX = ctx.worldID().idx;
     data.objectID = obj_id.idx;
+
+    // Get the root AABB from the model and translate it to store
+    // it in the TLBVHNode structure.
+    BVHModel &model = ctx.get<BVHModel>(renderable.renderEntity);
+
+    phys::MeshBVH *bvh = (phys::MeshBVH *)model.ptr;
+
+    math::AABB aabb = bvh->rootAABB.applyTRS(
+            data.position, data.rotation, data.scale);
+
+    ctx.get<TLBVHNode>(renderable.renderEntity).aabb = aabb;
+
+#if 0
+    printf("(%d) %f %f %f -> %f %f %f (scale is %f %f %f)\n",
+            renderable.renderEntity.id,
+            aabb.pMin.x, aabb.pMin.y, aabb.pMin.z,
+            aabb.pMax.x, aabb.pMax.y, aabb.pMax.z,
+            data.scale.d0, data.scale.d1, data.scale.d2);
+#endif
 }
 
 uint32_t * getVoxelPtr(Context &ctx)
@@ -198,6 +218,7 @@ void registerTypes(ECSRegistry &registry,
 
     registry.registerComponent<RenderOutput>();
     registry.registerComponent<BVHModel>();
+    registry.registerComponent<TLBVHNode>();
 
 
     // Pointers get set in RenderingSystem::init

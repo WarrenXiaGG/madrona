@@ -404,6 +404,11 @@ void * MeshBVHBuilder::build(Span<const imp::SourceMesh> src_meshes,
         .numLeaves = (uint32_t)num_leaves,
         .numVerts = (uint32_t)total_num_verts,
     };
+
+    printf("%f %f %f -> %f %f %f\n",
+            root_aabb.pMin.x, root_aabb.pMin.y, root_aabb.pMin.z,
+            root_aabb.pMax.x, root_aabb.pMax.y, root_aabb.pMax.z);
+
     *out_num_bytes = total_num_bytes;
 
     memcpy(out_bvh->nodes, nodes, sizeof(Node) * num_nodes);
