@@ -161,7 +161,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
                         closest_hit_normal = instance_data->rotation.rotateVec(
                                 instance_data->scale * leaf_hit_normal);
-                        closest_hit_normal.normalize();
+                        closest_hit_normal = closest_hit_normal.normalize();
                     }
 #endif
                 } else {
