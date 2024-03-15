@@ -121,7 +121,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
                     render::BVHModel *model = &bvh_models[child_node_idx];
                     render::InstanceData *instance_data = &instances[child_node_idx];
-                    phys::MeshBVH *model_bvh = (phys::MeshBVH *)model->ptr;
+                    phys::MeshBVH *model_bvh = (phys::MeshBVH *)model->bvh;
 
                     // Now we trace through this model.
                     float hit_t;
@@ -150,7 +150,8 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
                     INSPECT("bvh vertices at : %p\n", model_bvh->vertices);
 
-                    bool leaf_hit = model_bvh->traceRay(txfm_ray_o, txfm_ray_d, &hit_t,
+                    bool leaf_hit = model_bvh->traceRay(
+                            txfm_ray_o, txfm_ray_d, &hit_t,
                             &leaf_hit_normal, &stack, txfm, t_max);
 
                     if (leaf_hit) {

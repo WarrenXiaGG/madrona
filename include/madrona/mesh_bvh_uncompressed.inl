@@ -1,52 +1,42 @@
 #include <cassert>
+#include <cstdio>
 
 namespace madrona::phys {
 
-constexpr int SHARED_STACK_SIZE = 6;
-
-//#define SHARED_STACK
-#ifdef SHARED_STACK
-    #define STACK_POP(X) { --stack_size; if (stack_size < SHARED_STACK_SIZE) X = shared_stack[stack_size]; else X = stack[stack_size - SHARED_STACK_SIZE]; }
-    #define STACK_PUSH(X) { if (stack_size < SHARED_STACK_SIZE) shared_stack[stack_size] = X; else stack[stack_size - SHARED_STACK_SIZE] = X; stack_size++; }
-#else
-    #define STACK_POP(X) {X = stack[--stack_size];}
-    #define STACK_PUSH(X) { stack[stack_size++] = X; }
-#endif
-
-bool MeshBVH2::Node::isLeaf(madrona::CountT child) const
+bool MeshBVHUncompressed::Node::isLeaf(CountT child) const
 {
     return children[child] & 0x80000000;
 }
 
-int32_t MeshBVH2::Node::leafIDX(madrona::CountT child) const
+int32_t MeshBVHUncompressed::Node::leafIDX(CountT child) const
 {
     return children[child] & ~0x80000000;
 }
 
-void MeshBVH2::Node::setLeaf(madrona::CountT child, int32_t idx)
+void MeshBVHUncompressed::Node::setLeaf(CountT child, int32_t idx)
 {
     children[child] = 0x80000000 | idx;
 }
 
-void MeshBVH2::Node::setInternal(madrona::CountT child, int32_t internal_idx)
+void MeshBVHUncompressed::Node::setInternal(CountT child, int32_t internal_idx)
 {
     children[child] = internal_idx;
 }
 
-bool MeshBVH2::Node::hasChild(madrona::CountT child) const
+bool MeshBVHUncompressed::Node::hasChild(CountT child) const
 {
     return children[child] != sentinel;
 }
 
-void MeshBVH2::Node::clearChild(madrona::CountT child)
+void MeshBVHUncompressed::Node::clearChild(CountT child)
 {
     children[child] = sentinel;
 }
 
 template <typename Fn>
-void MeshBVH2::findOverlaps(const math::AABB &aabb, Fn &&fn) const
+void MeshBVHUncompressed::findOverlaps(const math::AABB &aabb, Fn &&fn) const
 {
-    using namespace madrona::math;
+    using namespace math;
 
     int32_t stack[32];
     stack[0] = 0;
@@ -55,20 +45,21 @@ void MeshBVH2::findOverlaps(const math::AABB &aabb, Fn &&fn) const
     while (stack_size > 0) {
         int32_t node_idx = stack[--stack_size];
         const Node &node = nodes[node_idx];
-        for (int32_t i = 0; i < MeshBVH2::nodeWidth; i++) {
+        for (int32_t i = 0; i < MeshBVHUncompressed::nodeWidth; i++) {
             if (!node.hasChild(i)) {
                 continue; // Technically this could be break?
             };
+
             math::AABB child_aabb {
                 .pMin = {
-                    node.minX + std::bit_cast<float>((node.expX + 127) << 23) * node.qMinX[i],
-                    node.minY + std::bit_cast<float>((node.expY + 127) << 23) * node.qMinY[i],
-                    node.minZ + std::bit_cast<float>((node.expZ + 127) << 23) * node.qMinZ[i],
+                    node.minX[i],
+                    node.minY[i],
+                    node.minZ[i],
                 },
                 .pMax = {
-                    node.minX + std::bit_cast<float>((node.expX + 127) << 23) * node.qMaxX[i],
-                    node.minY + std::bit_cast<float>((node.expY + 127) << 23) * node.qMaxY[i],
-                    node.minZ + std::bit_cast<float>((node.expZ + 127) << 23) * node.qMaxZ[i],
+                    node.maxX[i],
+                    node.maxY[i],
+                    node.maxZ[i],
                 },
             };
 
@@ -94,95 +85,53 @@ void MeshBVH2::findOverlaps(const math::AABB &aabb, Fn &&fn) const
     }
 }
 
-bool MeshBVH2::traceRay(math::Vector3 ray_o,
-                       math::Vector3 ray_d,
-                       float *out_hit_t,
-                       math::Vector3 *out_hit_normal,
-                       void* shared,
-                       TraversalStack *stack,
-                       const AABBTransform &txfm,
-                       float t_max) const
+bool MeshBVHUncompressed::traceRay(math::Vector3 ray_o,
+                                   math::Vector3 ray_d,
+                                   float *out_hit_t,
+                                   math::Vector3 *out_hit_normal,
+                                   TraversalStack *stack,
+                                   const AABBTransform &txfm,
+                                   float t_max) const
 {
     using namespace math;
-    constexpr float diveps = 0.0000001f;
+
+    static constexpr float epsilon = 0.00001f;
 
     Diag3x3 inv_d = Diag3x3::fromVec(ray_d).inv();
 
-    math::AABB root_aabb = rootAABB.applyTRS(txfm.pos, txfm.rot, txfm.scale);
-
-    RayIsectTxfm tri_isect_txfm = 
-        computeRayIsectTxfm(ray_o, ray_d, inv_d, root_aabb);
+    RayIsectTxfm tri_isect_txfm =
+        computeRayIsectTxfm(ray_o, ray_d, inv_d, rootAABB);
 
     uint32_t previous_stack_size = stack->size;
 
     stack->push(0);
 
-#ifdef SHARED_STACK
-    const int32_t mwgpu_warp_id = threadIdx.x / 32;
-    const int32_t mwgpu_warp_lane = threadIdx.x % 32;
-    const int32_t num_smem_bytes_per_warp =
-        (mwGPU::SharedMemStorage::numBytesPerWarp()/4)*4;
-
-    auto sharedMem = ((char*)shared) + mwgpu_warp_id * num_smem_bytes_per_warp +
-            SHARED_STACK_SIZE * sizeof(int32_t) * mwgpu_warp_lane;
-    int32_t* shared_stack = (int32_t*)sharedMem;
-    shared_stack[0] = 0;
-#endif
-
     bool ray_hit = false;
-    Vector3 closest_hit_normal = Vector3{0,0,0};
+    Vector3 closest_hit_normal;
 
-    while (stack->size > previous_stack_size) { 
+    while (stack->size > previous_stack_size) {
         int32_t node_idx = stack->pop();
+
         const Node &node = nodes[node_idx];
-
-        float rayXInv = copysignf(ray_d.x == 0 ? 1/diveps : 1/ray_d.x,ray_d.x);
-        float rayYInv = copysignf(ray_d.y == 0 ? 1/diveps : 1/ray_d.y,ray_d.y);
-        float rayZInv = copysignf(ray_d.z == 0 ? 1/diveps : 1/ray_d.z,ray_d.z);
-        //NVIDIA's method, transform for ray plane to quantized space. Shift to IEEE exponent bits.
-
-#ifdef MADRONA_GPU_MODE
-        float dirQuantX = __uint_as_float((node.expX + 127) << 23) * rayXInv;
-        float dirQuantY = __uint_as_float((node.expY + 127) << 23) * rayYInv;
-        float dirQuantZ = __uint_as_float((node.expZ + 127) << 23) * rayZInv;
-#else
-        float dirQuantX = std::bit_cast<float>((node.expX + 127) << 23) * rayXInv;
-        float dirQuantY = std::bit_cast<float>((node.expY + 127) << 23) * rayYInv;
-        float dirQuantZ = std::bit_cast<float>((node.expZ + 127) << 23) * rayZInv;
-#endif
-
-        float originQuantX = (node.minX - ray_o.x) * rayXInv;
-        float originQuantY = (node.minY - ray_o.y) * rayYInv;
-        float originQuantZ = (node.minZ - ray_o.z) * rayZInv;
-
-        for (CountT i = 0; i < MeshBVH2::nodeWidth; i++) {
+        for (CountT i = 0; i < MeshBVHUncompressed::nodeWidth; i++) {
             if (!node.hasChild(i)) {
                 continue; // Technically this could be break?
             };
 
-
-            float t_near_x = node.qMinX[i] * dirQuantX + originQuantX;
-            float t_near_y = node.qMinY[i] * dirQuantY + originQuantY;
-            float t_near_z = node.qMinZ[i] * dirQuantZ + originQuantZ;
-
-            float t_far_x = node.qMaxX[i] * dirQuantX + originQuantX;
-            float t_far_y = node.qMaxY[i] * dirQuantY + originQuantY;
-            float t_far_z = node.qMaxZ[i] * dirQuantZ + originQuantZ;
-/*
-            madrona::math::AABB child_aabb {
+            math::AABB child_aabb {
                 .pMin = {
-                    node.minX + std::bit_cast<float>((node.expX + 127) << 23) * node.qMinX[i],
-                    node.minY + std::bit_cast<float>((node.expY + 127) << 23) * node.qMinY[i],
-                    node.minZ + std::bit_cast<float>((node.expZ + 127) << 23) * node.qMinZ[i],
+                    node.minX[i],
+                    node.minY[i],
+                    node.minZ[i],
                 },
                 .pMax = {
-                    node.minX + std::bit_cast<float>((node.expX + 127) << 23) * node.qMaxX[i],
-                    node.minY + std::bit_cast<float>((node.expY + 127) << 23) * node.qMaxY[i],
-                    node.minZ + std::bit_cast<float>((node.expZ + 127) << 23) * node.qMaxZ[i]
+                    node.maxX[i],
+                    node.maxY[i],
+                    node.maxZ[i],
                 },
             };
 
-            float t_near_x = (child_aabb[tri_isect_txfm.nearX] -
+            float t_near_x = (child_aabb[tri_isect_txfm.nearX] - 
                               tri_isect_txfm.oNear.x) *
                                  tri_isect_txfm.invDirNear.x;
             float t_near_y = (child_aabb[tri_isect_txfm.nearY] -
@@ -192,7 +141,7 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
                               tri_isect_txfm.oNear.z) *
                                  tri_isect_txfm.invDirNear.z;
 
-            float t_far_x = (child_aabb[tri_isect_txfm.farX] -
+            float t_far_x = (child_aabb[tri_isect_txfm.farX] - 
                               tri_isect_txfm.oFar.x) *
                                  tri_isect_txfm.invDirFar.x;
             float t_far_y = (child_aabb[tri_isect_txfm.farY] -
@@ -201,19 +150,11 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
             float t_far_z = (child_aabb[tri_isect_txfm.farZ] -
                               tri_isect_txfm.oFar.z) *
                                  tri_isect_txfm.invDirFar.z;
+
             float t_near = fmaxf(t_near_x, fmaxf(t_near_y,
                 fmaxf(t_near_z, 0.f)));
             float t_far = fminf(t_far_x, fminf(t_far_y,
                 fminf(t_far_z, t_max)));
-
-                                 */
-
-            float t_near = fmaxf(fminf(t_near_x,t_far_x), fmaxf(fminf(t_near_y,t_far_y),
-                fmaxf(fminf(t_near_z,t_far_z), 0.f)));
-            float t_far = fminf(fmaxf(t_far_x,t_near_x), fminf(fmaxf(t_far_y,t_near_y),
-                fminf(fmaxf(t_far_z,t_near_z), t_max)));
-
-            //printf("%f,%f,%f,%f,%f,%f\n",t_near_x,t_near_y,t_near_z,t_far_x,t_far_y,t_far_z);
 
             if (t_near <= t_far) {
                 if (node.isLeaf(i)) {
@@ -230,12 +171,14 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
                         closest_hit_normal = leaf_hit_normal;
                     }
                 } else {
-                    assert(stack->size < 32);
+                    assert(stack->size < TraversalStack::stackSize);
                     stack->push(node.children[i]);
                 }
             }
         }
     }
+
+    assert(stack->size == previous_stack_size);
 
     if (!ray_hit) {
         return false;
@@ -246,91 +189,48 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
     return ray_hit;
 }
 
-bool MeshBVH2::traceRay(math::Vector3 ray_o,
+bool MeshBVHUncompressed::traceRay(math::Vector3 ray_o,
                        math::Vector3 ray_d,
                        float *out_hit_t,
                        math::Vector3 *out_hit_normal,
-                       void* shared,
-                       TraversalStack *stack,
                        float t_max) const
 {
     using namespace math;
-    constexpr float diveps = 0.0000001f;
 
     Diag3x3 inv_d = Diag3x3::fromVec(ray_d).inv();
 
-    RayIsectTxfm tri_isect_txfm = computeRayIsectTxfm(ray_o, ray_d, inv_d);
+    RayIsectTxfm tri_isect_txfm = computeRayIsectTxfm(
+            ray_o, ray_d, inv_d, rootAABB);
 
-    uint32_t previous_stack_size = stack->size;
-
-    stack->push(0);
-
-#ifdef SHARED_STACK
-    const int32_t mwgpu_warp_id = threadIdx.x / 32;
-    const int32_t mwgpu_warp_lane = threadIdx.x % 32;
-    const int32_t num_smem_bytes_per_warp =
-        (mwGPU::SharedMemStorage::numBytesPerWarp()/4)*4;
-
-    auto sharedMem = ((char*)shared) + mwgpu_warp_id * num_smem_bytes_per_warp +
-            SHARED_STACK_SIZE * sizeof(int32_t) * mwgpu_warp_lane;
-    int32_t* shared_stack = (int32_t*)sharedMem;
-    shared_stack[0] = 0;
-#endif
+    int32_t stack[32];
+    stack[0] = 0;
+    CountT stack_size = 1;
 
     bool ray_hit = false;
-    Vector3 closest_hit_normal = Vector3{0,0,0};
+    Vector3 closest_hit_normal;
 
-    while (stack->size > previous_stack_size) { 
-        int32_t node_idx = stack->pop();
+    while (stack_size > 0) { 
+        int32_t node_idx = stack[--stack_size];
         const Node &node = nodes[node_idx];
-
-        float rayXInv = copysignf(ray_d.x == 0 ? 1/diveps : 1/ray_d.x,ray_d.x);
-        float rayYInv = copysignf(ray_d.y == 0 ? 1/diveps : 1/ray_d.y,ray_d.y);
-        float rayZInv = copysignf(ray_d.z == 0 ? 1/diveps : 1/ray_d.z,ray_d.z);
-        //NVIDIA's method, transform for ray plane to quantized space. Shift to IEEE exponent bits.
-
-#ifdef MADRONA_GPU_MODE
-        float dirQuantX = __uint_as_float((node.expX + 127) << 23) * rayXInv;
-        float dirQuantY = __uint_as_float((node.expY + 127) << 23) * rayYInv;
-        float dirQuantZ = __uint_as_float((node.expZ + 127) << 23) * rayZInv;
-#else
-        float dirQuantX = std::bit_cast<float>((node.expX + 127) << 23) * rayXInv;
-        float dirQuantY = std::bit_cast<float>((node.expY + 127) << 23) * rayYInv;
-        float dirQuantZ = std::bit_cast<float>((node.expZ + 127) << 23) * rayZInv;
-#endif
-
-        float originQuantX = (node.minX - ray_o.x) * rayXInv;
-        float originQuantY = (node.minY - ray_o.y) * rayYInv;
-        float originQuantZ = (node.minZ - ray_o.z) * rayZInv;
-
-        for (CountT i = 0; i < MeshBVH2::nodeWidth; i++) {
+        for (CountT i = 0; i < MeshBVHUncompressed::nodeWidth; i++) {
             if (!node.hasChild(i)) {
                 continue; // Technically this could be break?
             };
 
-
-            float t_near_x = node.qMinX[i] * dirQuantX + originQuantX;
-            float t_near_y = node.qMinY[i] * dirQuantY + originQuantY;
-            float t_near_z = node.qMinZ[i] * dirQuantZ + originQuantZ;
-
-            float t_far_x = node.qMaxX[i] * dirQuantX + originQuantX;
-            float t_far_y = node.qMaxY[i] * dirQuantY + originQuantY;
-            float t_far_z = node.qMaxZ[i] * dirQuantZ + originQuantZ;
-/*
-            madrona::math::AABB child_aabb {
+            math::AABB child_aabb {
                 .pMin = {
-                    node.minX + std::bit_cast<float>((node.expX + 127) << 23) * node.qMinX[i],
-                    node.minY + std::bit_cast<float>((node.expY + 127) << 23) * node.qMinY[i],
-                    node.minZ + std::bit_cast<float>((node.expZ + 127) << 23) * node.qMinZ[i],
+                    node.minX[i],
+                    node.minY[i],
+                    node.minZ[i],
                 },
                 .pMax = {
-                    node.minX + std::bit_cast<float>((node.expX + 127) << 23) * node.qMaxX[i],
-                    node.minY + std::bit_cast<float>((node.expY + 127) << 23) * node.qMaxY[i],
-                    node.minZ + std::bit_cast<float>((node.expZ + 127) << 23) * node.qMaxZ[i]
+                    node.maxX[i],
+                    node.maxY[i],
+                    node.maxZ[i],
                 },
             };
 
-            float t_near_x = (child_aabb[tri_isect_txfm.nearX] -
+            float t_near_x = (child_aabb[tri_isect_txfm.nearX] - 
                               tri_isect_txfm.oNear.x) *
                                  tri_isect_txfm.invDirNear.x;
             float t_near_y = (child_aabb[tri_isect_txfm.nearY] -
@@ -340,7 +240,7 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
                               tri_isect_txfm.oNear.z) *
                                  tri_isect_txfm.invDirNear.z;
 
-            float t_far_x = (child_aabb[tri_isect_txfm.farX] -
+            float t_far_x = (child_aabb[tri_isect_txfm.farX] - 
                               tri_isect_txfm.oFar.x) *
                                  tri_isect_txfm.invDirFar.x;
             float t_far_y = (child_aabb[tri_isect_txfm.farY] -
@@ -349,19 +249,11 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
             float t_far_z = (child_aabb[tri_isect_txfm.farZ] -
                               tri_isect_txfm.oFar.z) *
                                  tri_isect_txfm.invDirFar.z;
+
             float t_near = fmaxf(t_near_x, fmaxf(t_near_y,
                 fmaxf(t_near_z, 0.f)));
             float t_far = fminf(t_far_x, fminf(t_far_y,
                 fminf(t_far_z, t_max)));
-
-                                 */
-
-            float t_near = fmaxf(fminf(t_near_x,t_far_x), fmaxf(fminf(t_near_y,t_far_y),
-                fmaxf(fminf(t_near_z,t_far_z), 0.f)));
-            float t_far = fminf(fmaxf(t_far_x,t_near_x), fminf(fmaxf(t_far_y,t_near_y),
-                fminf(fmaxf(t_far_z,t_near_z), t_max)));
-
-            //printf("%f,%f,%f,%f,%f,%f\n",t_near_x,t_near_y,t_near_z,t_far_x,t_far_y,t_far_z);
 
             if (t_near <= t_far) {
                 if (node.isLeaf(i)) {
@@ -378,8 +270,8 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
                         closest_hit_normal = leaf_hit_normal;
                     }
                 } else {
-                    assert(stack->size < 32);
-                    stack->push(node.children[i]);
+                    assert(stack_size < 32);
+                    stack[stack_size++] = node.children[i];
                 }
             }
         }
@@ -394,20 +286,20 @@ bool MeshBVH2::traceRay(math::Vector3 ray_o,
     return ray_hit;
 }
 
-bool MeshBVH2::traceRayLeaf(int32_t leaf_idx,
+bool MeshBVHUncompressed::traceRayLeaf(int32_t leaf_idx,
                            RayIsectTxfm tri_isect_txfm,
                            math::Vector3 ray_o,
                            float t_max,
                            float *out_hit_t,
                            math::Vector3 *out_hit_normal) const
 {
-    using namespace madrona::math;
+    using namespace math;
 
     // Woop et al 2013 Watertight Ray/Triangle Intersection
     Vector3 hit_normal;
     float hit_t;
     bool hit_tri = false;
-    for (CountT i = 0; i < MeshBVH2::numTrisPerLeaf; i++) {
+    for (CountT i = 0; i < MeshBVHUncompressed::numTrisPerLeaf; i++) {
         Vector3 a, b, c;
         bool tri_exists = fetchLeafTriangle(leaf_idx, i, &a, &b, &c);
         if (!tri_exists) continue;
@@ -437,7 +329,7 @@ bool MeshBVH2::traceRayLeaf(int32_t leaf_idx,
     }
 }
 
-bool MeshBVH2::rayTriangleIntersection(
+bool MeshBVHUncompressed::rayTriangleIntersection(
     math::Vector3 tri_a, math::Vector3 tri_b, math::Vector3 tri_c,
     int32_t kx, int32_t ky, int32_t kz,
     float Sx, float Sy, float Sz,
@@ -446,7 +338,7 @@ bool MeshBVH2::rayTriangleIntersection(
     float *out_hit_t,
     math::Vector3 *out_hit_normal) const
 {
-    using namespace madrona::math;
+    using namespace math;
 
     // Calculate vertices relative to ray origin
     const Vector3 A = tri_a - org;
@@ -467,7 +359,7 @@ bool MeshBVH2::rayTriangleIntersection(
     float W = fmaf(Bx, Ay, - By * Ax);
 
     // Perform edge tests
-#ifdef MADRONA_MESHBVH_BACKFACE_CULLING
+#ifdef MADRONA_MeshBVHUncompressed_BACKFACE_CULLING
     if (U < 0.0f || V < 0.0f || W < 0.0f) {
         return false;
     }
@@ -491,7 +383,7 @@ bool MeshBVH2::rayTriangleIntersection(
         W = (float)(BxAy - ByAx);
 
         // Perform edge tests
-#ifdef MADRONA_MESHBVH_BACKFACE_CULLING
+#ifdef MADRONA_MeshBVHUncompressed_BACKFACE_CULLING
         if (U < 0.0f || V < 0.0f || W < 0.0f) {
             return false;
         }
@@ -514,7 +406,7 @@ bool MeshBVH2::rayTriangleIntersection(
     const float Cz = Sz * C[kz];
     const float T = fmaf(U, Az, fmaf(V, Bz, W * Cz));
 
-#ifdef MADRONA_MESHBVH_BACKFACE_CULLING
+#ifdef MADRONA_MeshBVHUncompressed_BACKFACE_CULLING
     if (T < 0.0f || T > t_max * det) {
         return false;
     }
@@ -553,12 +445,13 @@ bool MeshBVH2::rayTriangleIntersection(
     *out_hit_t = T * rcpDet;
 
     // FIXME better way to get geo normal?
+
     *out_hit_normal = normalize(cross(B - A, C - A));
 
     return true;
 }
 
-bool MeshBVH2::fetchLeafTriangle(CountT leaf_idx,
+bool MeshBVHUncompressed::fetchLeafTriangle(CountT leaf_idx,
                                 CountT offset,
                                 math::Vector3 *a,
                                 math::Vector3 *b,
@@ -575,6 +468,10 @@ bool MeshBVH2::fetchLeafTriangle(CountT leaf_idx,
     uint32_t b_idx = uint32_t((int32_t)a_idx + b_diff);
     uint32_t c_idx = uint32_t((int32_t)a_idx + c_diff);
 
+    assert(a_idx < numVerts);
+    assert(b_idx < numVerts);
+    assert(c_idx < numVerts);
+
     *a = vertices[a_idx];
     *b = vertices[b_idx];
     *c = vertices[c_idx];
@@ -582,15 +479,9 @@ bool MeshBVH2::fetchLeafTriangle(CountT leaf_idx,
     return true;
 }
 
-MeshBVH2::RayIsectTxfm MeshBVH2::computeRayIsectTxfm(
-    math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d) const
-{
-    return computeRayIsectTxfm(o, d, inv_d, rootAABB);
-}
-
-MeshBVH2::RayIsectTxfm MeshBVH2::computeRayIsectTxfm(
+MeshBVHUncompressed::RayIsectTxfm MeshBVHUncompressed::computeRayIsectTxfm(
     math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d,
-    math::AABB root_aabb)
+    const math::AABB &root_aabb) const
 {
     // Woop et al 2013
     float abs_x = fabsf(d.x);
@@ -747,7 +638,7 @@ MeshBVH2::RayIsectTxfm MeshBVH2::computeRayIsectTxfm(
     };
 }
 
-float MeshBVH2::sphereCast(math::Vector3 ray_o,
+float MeshBVHUncompressed::sphereCast(math::Vector3 ray_o,
                           math::Vector3 ray_d,
                           float sphere_r,
                           math::Vector3 *out_hit_normal,
@@ -767,22 +658,23 @@ float MeshBVH2::sphereCast(math::Vector3 ray_o,
     while (stack_size > 0) { 
         int32_t node_idx = stack[--stack_size];
         const Node &node = nodes[node_idx];
+
 #pragma unroll
-        for (CountT i = 0; i < (CountT)MeshBVH2::nodeWidth; i++) {
+        for (CountT i = 0; i < (CountT)MeshBVHUncompressed::nodeWidth; i++) {
             if (!node.hasChild(i)) {
                 continue; // Technically this could be break?
             };
 
             math::AABB child_aabb {
                 .pMin = {
-                    node.minX + (1 << node.expX) * node.qMinX[i],
-                    node.minY + (1 << node.expY) * node.qMinY[i],
-                    node.minZ + (1 << node.expZ) * node.qMinZ[i],
+                    node.minX[i],
+                    node.minY[i],
+                    node.minZ[i],
                 },
                 .pMax = {
-                    node.minX + (1 << node.expX) * node.qMaxX[i],
-                    node.minY + (1 << node.expY) * node.qMaxY[i],
-                    node.minZ + (1 << node.expZ) * node.qMaxZ[i],
+                    node.maxX[i],
+                    node.maxY[i],
+                    node.maxZ[i],
                 },
             };
 
@@ -813,7 +705,7 @@ float MeshBVH2::sphereCast(math::Vector3 ray_o,
     return hit_t;
 }
 
-bool MeshBVH2::sphereCastNodeCheck(math::Vector3 o,
+bool MeshBVHUncompressed::sphereCastNodeCheck(math::Vector3 o,
                                   math::Diag3x3 inv_d,
                                   float t_max,
                                   float sphere_r,
@@ -853,17 +745,17 @@ bool MeshBVH2::sphereCastNodeCheck(math::Vector3 o,
     return t_min < t_max;
 }
 
-float MeshBVH2::sphereCastLeaf(int32_t leaf_idx,
+float MeshBVHUncompressed::sphereCastLeaf(int32_t leaf_idx,
                               math::Vector3 ray_o,
                               math::Vector3 ray_d,
                               float t_max,
                               float sphere_r,
                               math::Vector3 *out_hit_normal) const
 {
-    using namespace madrona::math;
+    using namespace math;
 
     float hit_t = t_max;
-    for (CountT i = 0; i < MeshBVH2::numTrisPerLeaf; i++) {
+    for (CountT i = 0; i < MeshBVHUncompressed::numTrisPerLeaf; i++) {
         Vector3 a, b, c;
         bool tri_exists = fetchLeafTriangle(leaf_idx, i, &a, &b, &c);
         if (!tri_exists) continue;
@@ -880,7 +772,7 @@ float MeshBVH2::sphereCastLeaf(int32_t leaf_idx,
     return hit_t;
 }
 
-float MeshBVH2::sphereCastTriangle(math::Vector3 tri_a,
+float MeshBVHUncompressed::sphereCastTriangle(math::Vector3 tri_a,
                                   math::Vector3 tri_b,
                                   math::Vector3 tri_c,
                                   math::Vector3 ray_o,

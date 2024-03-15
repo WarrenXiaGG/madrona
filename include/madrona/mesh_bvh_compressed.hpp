@@ -27,7 +27,7 @@ struct TraversalStack {
     }
 };
 
-struct MeshBVH2 {
+struct MeshBVHCompressed {
     static constexpr inline CountT numTrisPerLeaf = 8;
     static constexpr inline CountT nodeWidth = 4;
     static constexpr inline int32_t sentinel = (int32_t)0xFFFF'FFFF;
@@ -130,7 +130,7 @@ struct MeshBVH2 {
 
     inline bool traceRayLeafIndexed(int32_t leaf_idx,
                            int32_t i,
-                           MeshBVH2::RayIsectTxfm tri_isect_txfm,
+                           MeshBVHCompressed::RayIsectTxfm tri_isect_txfm,
                            math::Vector3 ray_o,
                            float t_max,
                            float *out_hit_t,
@@ -194,4 +194,4 @@ struct MeshBVH2 {
 
 }
 
-#include "mesh_bvh3.inl"
+#include "mesh_bvh_compressed.inl"

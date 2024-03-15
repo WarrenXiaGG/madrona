@@ -96,21 +96,12 @@ inline void instanceTransformUpdate(Context &ctx,
     // Get the root AABB from the model and translate it to store
     // it in the TLBVHNode structure.
     BVHModel &model = ctx.get<BVHModel>(renderable.renderEntity);
-
-    phys::MeshBVH *bvh = (phys::MeshBVH *)model.ptr;
+    phys::MeshBVH *bvh = model.bvh;
 
     math::AABB aabb = bvh->rootAABB.applyTRS(
             data.position, data.rotation, data.scale);
 
     ctx.get<TLBVHNode>(renderable.renderEntity).aabb = aabb;
-
-#if 0
-    printf("(%d) %f %f %f -> %f %f %f (position is %f %f %f)\n",
-            renderable.renderEntity.id,
-            aabb.pMin.x, aabb.pMin.y, aabb.pMin.z,
-            aabb.pMax.x, aabb.pMax.y, aabb.pMax.z,
-            pos.x, pos.y, pos.z);
-#endif
 }
 
 uint32_t * getVoxelPtr(Context &ctx)

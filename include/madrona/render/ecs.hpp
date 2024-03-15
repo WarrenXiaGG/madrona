@@ -1,6 +1,7 @@
 #pragma once
 
 #include <madrona/taskgraph_builder.hpp>
+#include <madrona/mesh_bvh.hpp>
 #include <madrona/math.hpp>
 
 namespace madrona::render {
@@ -55,7 +56,7 @@ struct RenderOutput {
 };
 
 struct BVHModel {
-    void* ptr;
+    phys::MeshBVH *bvh;
 };
 
 // Top level acceleration structure node

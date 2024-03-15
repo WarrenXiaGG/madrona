@@ -158,7 +158,7 @@ extern "C" __global__ void bvhAllocInternalNodes()
 
     for (int i = 0; i < 10; ++i) {
         render::BVHModel *model = &bvhParams.bvhModels[i];
-        phys::MeshBVH *mesh_bvh = (phys::MeshBVH *)model->ptr;
+        phys::MeshBVH *mesh_bvh = (phys::MeshBVH *)model->bvh;
 
         printf("%f %f %f\n", mesh_bvh->vertices[i].x,
                 mesh_bvh->vertices[i].z, mesh_bvh->vertices[i].z);
