@@ -5,6 +5,10 @@
 
 namespace madrona::phys {
 
+struct TriangleIndices {
+    uint32_t indices[3];
+};
+
 enum class CollisionFlags : uint64_t {
     BlocksRaycasts = 1 << 0,
 };
@@ -56,7 +60,7 @@ struct MeshBVH {
     };
 
     struct LeafGeometry {
-        uint64_t packedIndices[numTrisPerLeaf];
+        TriangleIndices packedIndices[numTrisPerLeaf];
     };
 
     struct LeafMaterial {
@@ -173,6 +177,8 @@ struct MeshBVH {
     uint32_t numNodes;
     uint32_t numLeaves;
     uint32_t numVerts;
+
+    uint32_t magic;
 };
 
 }

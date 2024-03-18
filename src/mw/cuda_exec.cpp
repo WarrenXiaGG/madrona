@@ -310,9 +310,14 @@ struct BVHKernels {
     // Debugging function
     CUfunction debug;
 
+    // Raycasts
     CUfunction raycast;
 
+    // Walks up the tree and constructs AABBs from the LBVH
     CUfunction constructAABBs;
+
+    CUevent startEvent;
+    CUevent stopEvent;
 };
 
 struct GPUKernels {
@@ -354,6 +359,9 @@ struct MWCudaExecutor::Impl {
     CUmodule cuModule;
     GPUEngineState engineState; 
     CUgraphExec runGraph;
+
+    bool enableRaycasting;
+    BVHKernels bvhKernels;
 };
 
 static void getUserEntries(const char *entry_class, CUmodule mod,
@@ -1092,6 +1100,12 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
     REQ_CU(cuModuleGetFunction(&bvh_raycast_entry, mod,
                                "bvhRaycastEntry"));
 
+    CUevent start_record;
+    CUevent end_record;
+
+    cuEventCreate(&start_record, CU_EVENT_DEFAULT);
+    cuEventCreate(&end_record, CU_EVENT_DEFAULT);
+
     BVHKernels bvh_kernels = {
         .numSMs = (uint32_t)num_sms,
         .mod = mod,
@@ -1101,7 +1115,9 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
         .optFast = bvh_opt,
         .debug = bvh_debug,
         .raycast = bvh_raycast_entry,
-        .constructAABBs = bvh_aabbs
+        .constructAABBs = bvh_aabbs,
+        .startEvent = start_record,
+        .stopEvent = end_record
     };
 
     return bvh_kernels;
@@ -1873,6 +1889,7 @@ static CUgraphExec makeTaskGraphRunGraph(
     const CUfunction *megakernels,
     int64_t num_megakernels,
     BVHKernels &bvh_kernels,
+    bool enable_raycasting,
     int shared_mem_per_sm)
 {
     CUgraph run_graph;
@@ -1966,7 +1983,14 @@ static CUgraphExec makeTaskGraphRunGraph(
     }
 
 #if 1
-    { // Add the bvh kernel nodes
+    if (enable_raycasting) { // Add the bvh kernel nodes
+        // Add the start record event
+        CUgraphNode start_record_node;
+        REQ_CU(cuGraphAddEventRecordNode(
+                    &start_record_node, run_graph,
+                    &megakernel_launches.back(), 1,
+                    bvh_kernels.startEvent));
+
         CUDA_KERNEL_NODE_PARAMS bvh_launch_params = {
             .func = bvh_kernels.allocInternalNodes,
             // We want to max-out the GPU for all the BVH kernels
@@ -1984,7 +2008,7 @@ static CUgraphExec makeTaskGraphRunGraph(
         // Allocation node
         CUgraphNode alloc_node;
         REQ_CU(cuGraphAddKernelNode(&alloc_node, run_graph,
-                                    &megakernel_launches.back(), 1,
+                                    &start_record_node, 1,
                                     &bvh_launch_params));
 
         // Fast LBVH build node
@@ -2030,6 +2054,12 @@ static CUgraphExec makeTaskGraphRunGraph(
                                     &construct_aabbs_node, 1,
                                     &bvh_launch_raycast));
 #endif
+
+        CUgraphNode end_record_node;
+        REQ_CU(cuGraphAddEventRecordNode(
+                    &end_record_node, run_graph,
+                    &raycast_node, 1,
+                    bvh_kernels.stopEvent));
     }
 #endif
 
@@ -2098,7 +2128,12 @@ MWCudaExecutor::MWCudaExecutor(const StateConfig &state_cfg,
     REQ_CU(cuDeviceGetAttribute(&cu_capability.second,
         CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, cu_gpu));
 
-    BVHKernels bvh_kernels = buildBVHKernels(compile_cfg, num_sms, cu_capability);
+    auto *render_mode = getenv("MADRONA_RENDER_MODE");
+
+    bool enable_raycasting = (render_mode[0] == '2');
+
+    BVHKernels bvh_kernels = buildBVHKernels(
+                compile_cfg, num_sms, cu_capability);
 
     GPUKernels gpu_kernels = buildKernels(compile_cfg, megakernel_cfgs,
         exec_mode, num_sms, cu_capability);
@@ -2119,6 +2154,7 @@ MWCudaExecutor::MWCudaExecutor(const StateConfig &state_cfg,
                                   gpu_kernels.megakernels.data(),
                                   gpu_kernels.megakernels.size(),
                                   bvh_kernels,
+                                  enable_raycasting,
                                   shared_mem_per_sm);
 
     impl_ = std::unique_ptr<Impl>(new Impl {
@@ -2126,6 +2162,8 @@ MWCudaExecutor::MWCudaExecutor(const StateConfig &state_cfg,
         gpu_kernels.mod,
         std::move(eng_state),
         run_graph,
+        enable_raycasting,
+        bvh_kernels
     });
 
     std::cout << "Initialization finished" << std::endl;
@@ -2162,6 +2200,20 @@ void MWCudaExecutor::run()
     HostEventLogging(HostEvent::megaKernelEnd);
 #ifdef MADRONA_TRACING
     impl_->engineState.deviceTracing->transferLogToCPU();
+#endif
+
+#if 1
+    if (impl_->enableRaycasting) {
+        REQ_CU(cuEventSynchronize(impl_->bvhKernels.startEvent));
+        REQ_CU(cuEventSynchronize(impl_->bvhKernels.stopEvent));
+
+        float ms = 0.f;
+        REQ_CU(cuEventElapsedTime(&ms,
+                    impl_->bvhKernels.startEvent, 
+                    impl_->bvhKernels.stopEvent));
+
+        printf("ray casting kernels took %f ms\n", ms);
+    }
 #endif
 }
 

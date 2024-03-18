@@ -74,6 +74,8 @@ struct BVHInternalData {
     AtomicU32 buildFastAccumulator;
     AtomicU32 optFastAccumulator;
     AtomicU32 constructAABBsAccumulator;
+
+    uint32_t numFrames;
 };
 
 struct BVHParams {

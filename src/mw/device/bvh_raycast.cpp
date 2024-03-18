@@ -30,7 +30,6 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                                     float t_max)
 {
 #define INSPECT(...) if (pixel_x == 32 && pixel_y == 32) { printf(__VA_ARGS__); }
-
     static constexpr float epsilon = 0.00001f;
 
     if (ray_d.x == 0.f) {
@@ -52,6 +51,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
     // internal_nodes_offset contains the offset to instance attached
     // data of world being operated on.
     uint32_t internal_nodes_offset = bvhParams.instanceOffsets[world_idx];
+    uint32_t num_instances = bvhParams.instanceCounts[world_idx];
 
     LBVHNode *internal_nodes = internal_data->internalNodes + internal_nodes_offset;
     LBVHNode *leaves = internal_data->leaves + internal_nodes_offset;
@@ -105,11 +105,6 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     4.0f, t_max, aabb_hit_t, aabb_far_t);
 
             if (aabb_hit_t <= t_max) {
-#if 0
-                INSPECT("(%d %d) Hit an AABB (%d)\n", pixel_x, pixel_y, 
-                        children_indices[i]);
-#endif
-
                 // If the near T of the box intersection happens before the closest
                 // intersection we got thus far, try tracing through.
 
@@ -120,8 +115,39 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     // LBVHNode *leaf_node = &leaves[child_node_idx];
 
                     render::BVHModel *model = &bvh_models[child_node_idx];
-                    render::InstanceData *instance_data = &instances[child_node_idx];
                     phys::MeshBVH *model_bvh = (phys::MeshBVH *)model->ptr;
+
+#if 0
+            
+                    printf("%p %u %d %d 0x%08x %p %d\n", 
+                            bvhParams.bvhModels,
+                            num_instances,
+                            internal_nodes_offset,
+                            child_node_idx, model_bvh->magic,
+                            // (void *)model_bvh->nodes,
+                            // model_bvh->nodes[0].parentID,
+                            model_bvh, node_store_idx);
+
+                    printf("%p %u %d %d 0x%08x %p %d\n", 
+                            bvhParams.bvhModels,
+                            num_instances,
+                            internal_nodes_offset,
+                            child_node_idx, model_bvh->magic,
+                            // (void *)model_bvh->nodes,
+                            // model_bvh->nodes[0].parentID,
+                            model_bvh, node_store_idx);
+
+                    printf("%p %u %d %d 0x%08x %p %d\n", 
+                            bvhParams.bvhModels,
+                            num_instances,
+                            internal_nodes_offset,
+                            child_node_idx, model_bvh->magic,
+                            // (void *)model_bvh->nodes,
+                            // model_bvh->nodes[0].parentID,
+                            model_bvh, node_store_idx);
+#endif
+
+                    render::InstanceData *instance_data = &instances[child_node_idx];
 
                     // Now we trace through this model.
                     float hit_t;
@@ -148,8 +174,13 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
                     txfm_ray_d /= t_scale;
 
-                    INSPECT("bvh vertices at : %p\n", model_bvh->vertices);
+                    // INSPECT("bvh vertices at : %p\n", model_bvh->vertices);
 
+#if 0
+                    printf("BEFORE TRACERAY\n");
+                    printf("BEFORE TRACERAY\n");
+#endif
+                    
                     bool leaf_hit = model_bvh->traceRay(txfm_ray_o, txfm_ray_d, &hit_t,
                             &leaf_hit_normal, &stack, txfm, t_max);
 

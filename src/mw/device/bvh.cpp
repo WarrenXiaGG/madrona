@@ -68,6 +68,7 @@ extern "C" {
 
 extern "C" __global__ void bvhInit()
 {
+    // bvhParams.internal_data->numFrames = 0;
 }
 
 // Because the number of instances / views isn't going to be known when the
@@ -156,13 +157,73 @@ extern "C" __global__ void bvhAllocInternalNodes()
     }
 #endif
 
-    for (int i = 0; i < 10; ++i) {
-        render::BVHModel *model = &bvhParams.bvhModels[i];
-        phys::MeshBVH *mesh_bvh = (phys::MeshBVH *)model->ptr;
 
-        printf("%f %f %f\n", mesh_bvh->vertices[i].x,
-                mesh_bvh->vertices[i].z, mesh_bvh->vertices[i].z);
+
+
+#if 0
+    for (int i = 0; i < num_instances; ++i) {
+        render::BVHModel *model = &bvhParams.bvhModels[i];
+        phys::MeshBVH *model_bvh = (phys::MeshBVH *)model->ptr;
+        printf("FAULTY MODEL??? %p: 0x%08x\n", model_bvh, model_bvh->magic);
     }
+#endif
+
+#if 0
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+    printf("hello\n");
+#endif
+
+
+    bvhParams.internalData->numFrames++;
 }
 
 namespace bits {
@@ -269,17 +330,12 @@ extern "C" __global__ void bvhBuildFast()
 
     if (tn_offset == 0) {
         nodes[tn_offset].parent = 0xFFFF'FFFF;
-        printf("Root at %p\n", &nodes[tn_offset]);
+        // printf("Root at %p\n", &nodes[tn_offset]);
     }
 
     if (tn_offset >= world_info.numInternalNodes) {
         return;
     }
-
-#if 0
-    printf("(thread_offset = %d) tn_offset = %d | internalNodesOffset = %d | numInternalNodes = %d\n",
-            thread_offset, tn_offset, world_info.internalNodesOffset, world_info.numInternalNodes);
-#endif
 
     // For now, we load things directly from global memory which sucks.
     // Need to try the strategy from the TODO
@@ -353,7 +409,7 @@ extern "C" __global__ void bvhBuildFast()
         nodes[tn_offset].reachedCount.store_relaxed(0);
 
         if (tn_offset == 0) {
-            printf("REAL Parent is root! %p\n", &leaves[split_index]);
+            // printf("REAL Parent is root! %p\n", &leaves[split_index]);
         }
 
         leaves[split_index].parent = tn_offset;
@@ -369,7 +425,7 @@ extern "C" __global__ void bvhBuildFast()
         nodes[split_index].parent = tn_offset;
 
         if (tn_offset == 0) {
-            printf("REAL Parent is root! %p\n", &nodes[split_index]);
+            // printf("REAL Parent is root! %p\n", &nodes[split_index]);
         }
     }
     
@@ -385,7 +441,7 @@ extern "C" __global__ void bvhBuildFast()
         leaves[split_index+1].reachedCount.store_relaxed(0);
 
         if (tn_offset == 0) {
-            printf("REAL Parent is root! %p\n", &leaves[split_index+1]);
+            // printf("REAL Parent is root! %p\n", &leaves[split_index+1]);
         }
     } else {
         // The right node is an internal node and its index is split_index+1
@@ -394,7 +450,7 @@ extern "C" __global__ void bvhBuildFast()
         nodes[split_index + 1].parent = tn_offset;
 
         if (tn_offset == 0) {
-            printf("REAL Parent is root! %p\n", &nodes[split_index+1]);
+            // printf("REAL Parent is root! %p\n", &nodes[split_index+1]);
         }
     }
 }
@@ -458,7 +514,7 @@ extern "C" __global__ void bvhConstructAABBs()
     // => we need to break out of the loop.
     while (current->reachedCount.fetch_add_release(1) == 1) {
         if (current->parent == 0) {
-            printf("Parent is root! %p (%p)\n", current, internal_nodes);
+            // printf("Parent is root! %p (%p)\n", current, internal_nodes);
         }
 
         // Merge the AABBs of the children nodes. (Store like this for now to
@@ -522,10 +578,12 @@ extern "C" __global__ void bvhConstructAABBs()
         current->aabb = merged_aabb;
 
         if (current->parent == 0xFFFF'FFFF) {
+#if 0
             printf("%p, %f %f %f -> %f %f %f\n",
                     current,
                     merged_aabb.pMin.x, merged_aabb.pMin.y, merged_aabb.pMin.z,
                     merged_aabb.pMax.x, merged_aabb.pMax.y, merged_aabb.pMax.z);
+#endif
 
             break;
         } else {

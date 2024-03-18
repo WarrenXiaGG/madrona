@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "batch_renderer.hpp"
 #include "shader.hpp"
 #include "ecs_interop.hpp"
@@ -1109,6 +1110,9 @@ struct BatchRenderer::Impl {
 
     VkQueue renderQueue;
 
+    VkQueryPool timeQueryPool;
+    uint64_t timestamps[2];
+
     // This pipeline prepares the draw commands in the buffered draw cmds buffer
     // Pipeline<1> prepareViews;
 
@@ -1161,6 +1165,17 @@ BatchRenderer::Impl::Impl(const Config &cfg,
                        cfg.enableBatchRenderer,
                        rctx);
     }
+
+    VkQueryPoolCreateInfo pool_create_info = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = 2
+    };
+
+    REQ_VK(dev.dt.createQueryPool(dev.hdl, &pool_create_info, 
+                                  nullptr, &timeQueryPool));
+
+
 }
 
 BatchRenderer::BatchRenderer(const Config &cfg,
@@ -1211,6 +1226,8 @@ BatchRenderer::~BatchRenderer()
             impl->dev.dt.destroyFence(impl->dev.hdl, impl->batchFrames[i].renderFence, nullptr);
         }
     }
+
+    impl->dev.dt.destroyQueryPool(impl->dev.hdl, impl->timeQueryPool, nullptr);
 }
 
 
@@ -1587,6 +1604,11 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
         REQ_VK(impl->dev.dt.beginCommandBuffer(draw_cmd, &begin_info));
     }
 
+    impl->dev.dt.cmdResetQueryPool(draw_cmd, impl->timeQueryPool, 0, 2);
+
+    impl->dev.dt.cmdWriteTimestamp(draw_cmd, 
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, impl->timeQueryPool, 0);
+
     ////////////////////////////////////////////////////////////////
 
     { // Import sky and lighting information first
@@ -1789,6 +1811,9 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
         loaded_assets[0].indexBufferSet,
         frame_data.pbrSet);
 
+    impl->dev.dt.cmdWriteTimestamp(draw_cmd, 
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, impl->timeQueryPool, 1);
+
     // End the command buffer and stuff
     REQ_VK(impl->dev.dt.endCommandBuffer(draw_cmd));
 
@@ -1809,6 +1834,16 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
 
     REQ_VK(impl->dev.dt.resetFences(impl->dev.hdl, 1, &frame_data.renderFence));
     REQ_VK(impl->dev.dt.queueSubmit(impl->renderQueue, 1, &submit_info, frame_data.renderFence));
+
+    impl->dev.dt.getQueryPoolResults(
+                impl->dev.hdl, impl->timeQueryPool, 0, 2, sizeof(uint64_t) * 2, 
+                impl->timestamps, sizeof(uint64_t),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+    float delta_in_ms = float(impl->timestamps[1] - impl->timestamps[0]) *
+        impl->dev.timestampPeriod / 1000000.0f;
+
+    printf("rasterizer batch renderer took %f ms\n", delta_in_ms);
 
     frame_data.latestOp = LatestOperation::RenderViews;
 }

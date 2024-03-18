@@ -113,7 +113,10 @@ bool MeshBVH::traceRay(math::Vector3 ray_o,
         int32_t node_idx = stack->pop();
 
         const Node &node = nodes[node_idx];
+        // printf("node_idx=%d nodes=%p\n", node_idx, (void *)nodes);
         for (CountT i = 0; i < MeshBVH::nodeWidth; i++) {
+            // printf("%p\n", &node);
+
             if (!node.hasChild(i)) {
                 continue; // Technically this could be break?
             };
@@ -457,16 +460,25 @@ bool MeshBVH::fetchLeafTriangle(CountT leaf_idx,
                                 math::Vector3 *b,
                                 math::Vector3 *c) const
 {
-    uint64_t packed = leafGeos[leaf_idx].packedIndices[offset];
-    if (packed == 0xFFFF'FFFF'FFFF'FFFF) {
+    TriangleIndices packed = leafGeos[leaf_idx].packedIndices[offset];
+
+    if (packed.indices[0] == 0xFFFF'FFFF &&
+        packed.indices[1] == 0xFFFF'FFFF &&
+        packed.indices[2] == 0xFFFF'FFFF) {
         return false;
     }
 
+    uint32_t a_idx = packed.indices[0];
+    uint32_t b_idx = packed.indices[1];
+    uint32_t c_idx = packed.indices[2];
+
+#if 0
     uint32_t a_idx = uint32_t(packed >> 32);
     int16_t b_diff = int16_t((packed >> 16) & 0xFFFF);
     int16_t c_diff = int16_t(packed & 0xFFFF);
     uint32_t b_idx = uint32_t((int32_t)a_idx + b_diff);
     uint32_t c_idx = uint32_t((int32_t)a_idx + c_diff);
+#endif
 
     assert(a_idx < numVerts);
     assert(b_idx < numVerts);
