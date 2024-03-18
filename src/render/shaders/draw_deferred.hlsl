@@ -283,14 +283,22 @@ UVInterpolation interpolateUVs(
 
 uint zeroDummy()
 {
-    uint zero_dummy = min(asint(viewDataBuffer[0].data[2].w), 0) +
-                      min(asint(engineInstanceBuffer[0].data[0].x), 0) +
+    uint zero_dummy = min(asuint(viewDataBuffer[0].data[2].w), 0) +
+                      min(asuint(engineInstanceBuffer[0].data[0].x), 0) +
                       min(asuint(vertexDataBuffer[0].data[0].x), 0) +
                       min(meshDataBuffer[0].vertexOffset, 0) +
                       min(indexBuffer[0], 0) +
                       min(0, abs(materialTexturesArray[0].SampleLevel(
                           linearSampler, float2(0,0), 0).x)) +
-                      min(instanceOffsets[0], 0);
+                      min(instanceOffsets[0], 0) +
+                      min(asuint(lights[0].lightDir.x), 0) +
+                      min(abs(transmittanceLUT.SampleLevel(
+                          linearSampler, float2(0, 0), 0).x), 0) +
+                      min(abs(irradianceLUT.SampleLevel(
+                          linearSampler, float2(0, 0), 0).x), 0) +
+                      min(abs(scatteringLUT.SampleLevel(
+                          linearSampler, float3(0, 0, 0), 0).x), 0) +
+                      min(abs(skyBuffer[0].solarIrradiance.x), 0);
 
     return zero_dummy;
 }
@@ -665,6 +673,9 @@ void lighting(uint3 idx : SV_DispatchThreadID)
         metalness = material_data.metalness;
     }
 
+
+
+#if 1
     const float exposure = 20.0f;
 
     // Lighting calculations
@@ -701,6 +712,14 @@ void lighting(uint3 idx : SV_DispatchThreadID)
 
     float3 diff = one - exp_value;
     float3 out_color = diff;
+#else
+
+    float3 out_color = float3(0, 0, 0);
+    
+    if (was_rasterized) {
+        out_color = gbuffer_data.wNormal;
+    }
+#endif
 
     out_color += zeroDummy();
 
