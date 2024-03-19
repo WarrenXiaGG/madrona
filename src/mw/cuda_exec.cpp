@@ -12,6 +12,7 @@
 #include <string>
 #include <filesystem>
 #include <charconv>
+#include <vector>
 
 #include <cuda/atomic>
 
@@ -291,6 +292,12 @@ struct MegakernelConfig {
     uint32_t numSMs;
 };
 
+struct TimingData {
+    float totalTime;
+    float buildTimeRatio;
+    float traceTimeRatio;
+};
+
 struct BVHKernels {
     uint32_t numSMs;
     CUmodule mod;
@@ -316,8 +323,11 @@ struct BVHKernels {
     // Walks up the tree and constructs AABBs from the LBVH
     CUfunction constructAABBs;
 
-    CUevent startEvent;
+    CUevent startBuildEvent;
+    CUevent startTraceEvent;
     CUevent stopEvent;
+
+    std::vector<TimingData> recordedTimings;
 };
 
 struct GPUKernels {
@@ -1100,10 +1110,12 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
     REQ_CU(cuModuleGetFunction(&bvh_raycast_entry, mod,
                                "bvhRaycastEntry"));
 
-    CUevent start_record;
+    CUevent start_build_record;
+    CUevent start_trace_record;
     CUevent end_record;
 
-    cuEventCreate(&start_record, CU_EVENT_DEFAULT);
+    cuEventCreate(&start_build_record, CU_EVENT_DEFAULT);
+    cuEventCreate(&start_trace_record, CU_EVENT_DEFAULT);
     cuEventCreate(&end_record, CU_EVENT_DEFAULT);
 
     BVHKernels bvh_kernels = {
@@ -1116,7 +1128,8 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
         .debug = bvh_debug,
         .raycast = bvh_raycast_entry,
         .constructAABBs = bvh_aabbs,
-        .startEvent = start_record,
+        .startBuildEvent = start_build_record,
+        .startTraceEvent = start_trace_record,
         .stopEvent = end_record
     };
 
@@ -1989,7 +2002,7 @@ static CUgraphExec makeTaskGraphRunGraph(
         REQ_CU(cuGraphAddEventRecordNode(
                     &start_record_node, run_graph,
                     &megakernel_launches.back(), 1,
-                    bvh_kernels.startEvent));
+                    bvh_kernels.startBuildEvent));
 
         CUDA_KERNEL_NODE_PARAMS bvh_launch_params = {
             .func = bvh_kernels.allocInternalNodes,
@@ -2036,6 +2049,13 @@ static CUgraphExec makeTaskGraphRunGraph(
         // Each block processes 16x16 pixels and we have one thread per pixel.
 
 #if 1
+        CUgraphNode start_trace_node;
+        REQ_CU(cuGraphAddEventRecordNode(
+                    &start_trace_node, run_graph,
+                    &construct_aabbs_node, 1,
+                    bvh_kernels.startTraceEvent));
+
+
         const uint32_t num_resident_views_per_sm = 4;
 
         CUDA_KERNEL_NODE_PARAMS bvh_launch_raycast = {
@@ -2051,7 +2071,7 @@ static CUgraphExec makeTaskGraphRunGraph(
 
         CUgraphNode raycast_node;
         REQ_CU(cuGraphAddKernelNode(&raycast_node, run_graph,
-                                    &construct_aabbs_node, 1,
+                                    &start_trace_node, 1,
                                     &bvh_launch_raycast));
 #endif
 
@@ -2190,6 +2210,22 @@ MWCudaExecutor::~MWCudaExecutor()
     REQ_CU(cuGraphExecDestroy(impl_->runGraph));
     REQ_CU(cuModuleUnload(impl_->cuModule));
     REQ_CUDA(cudaStreamDestroy(impl_->cuStream));
+
+    if (impl_->enableRaycasting) {
+        float avg_total_time = 0.f;
+        float avg_trace_time = 0.f;
+
+        for (auto timing : impl_->bvhKernels.recordedTimings) {
+            avg_total_time += timing.totalTime;
+            avg_trace_time += timing.totalTime * timing.traceTimeRatio;
+        }
+
+        avg_total_time /= (float)impl_->bvhKernels.recordedTimings.size();
+        avg_trace_time /= (float)impl_->bvhKernels.recordedTimings.size();
+
+        printf("Average BVH kernels time: %f (%f spent in tracing)\n",
+                avg_total_time, avg_trace_time);
+    }
 }
 
 void MWCudaExecutor::run()
@@ -2204,15 +2240,34 @@ void MWCudaExecutor::run()
 
 #if 1
     if (impl_->enableRaycasting) {
-        REQ_CU(cuEventSynchronize(impl_->bvhKernels.startEvent));
+        REQ_CU(cuEventSynchronize(impl_->bvhKernels.startBuildEvent));
+        REQ_CU(cuEventSynchronize(impl_->bvhKernels.startTraceEvent));
         REQ_CU(cuEventSynchronize(impl_->bvhKernels.stopEvent));
 
-        float ms = 0.f;
-        REQ_CU(cuEventElapsedTime(&ms,
-                    impl_->bvhKernels.startEvent, 
+        float build_time_ms = 0.f;
+        REQ_CU(cuEventElapsedTime(&build_time_ms,
+                    impl_->bvhKernels.startBuildEvent, 
+                    impl_->bvhKernels.startTraceEvent));
+
+        float trace_time_ms = 0.f;
+        REQ_CU(cuEventElapsedTime(&trace_time_ms,
+                    impl_->bvhKernels.startTraceEvent, 
                     impl_->bvhKernels.stopEvent));
 
-        printf("ray casting kernels took %f ms\n", ms);
+        float total_time = trace_time_ms + build_time_ms;
+
+        impl_->bvhKernels.recordedTimings.push_back({
+            total_time,
+            build_time_ms / total_time,
+            trace_time_ms / total_time
+        });
+
+#if 0
+        printf("ray casting kernels took %f (%f build vs %f trace) ms\n",
+                total_time,
+                build_time_ms / total_time,
+                trace_time_ms / total_time);
+#endif
     }
 #endif
 }

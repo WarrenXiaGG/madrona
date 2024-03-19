@@ -1113,6 +1113,8 @@ struct BatchRenderer::Impl {
     VkQueryPool timeQueryPool;
     uint64_t timestamps[2];
 
+    std::vector<float> recordedTimings;
+
     // This pipeline prepares the draw commands in the buffered draw cmds buffer
     // Pipeline<1> prepareViews;
 
@@ -1228,6 +1230,19 @@ BatchRenderer::~BatchRenderer()
     }
 
     impl->dev.dt.destroyQueryPool(impl->dev.hdl, impl->timeQueryPool, nullptr);
+
+    auto *render_mode = getenv("MADRONA_RENDER_MODE");
+
+    if (render_mode[0] == '1') {
+        float avg_total_time = 0.f;
+        for (float timing : impl->recordedTimings) {
+            avg_total_time += timing;
+        }
+
+        avg_total_time /= (float)impl->recordedTimings.size();
+        
+        printf("Rasterizer had average %f per frame\n", avg_total_time);
+    }
 }
 
 
@@ -1843,7 +1858,8 @@ void BatchRenderer::renderViews(BatchRenderInfo info,
     float delta_in_ms = float(impl->timestamps[1] - impl->timestamps[0]) *
         impl->dev.timestampPeriod / 1000000.0f;
 
-    printf("rasterizer batch renderer took %f ms\n", delta_in_ms);
+    // printf("rasterizer batch renderer took %f ms\n", delta_in_ms);
+    impl->recordedTimings.push_back(delta_in_ms);
 
     frame_data.latestOp = LatestOperation::RenderViews;
 }
