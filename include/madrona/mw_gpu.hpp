@@ -47,6 +47,8 @@ struct StateConfig {
 
     // Number of exported ECS components
     uint32_t numExportedBuffers;
+
+    uint32_t numVertices;
 };
 
 struct CompileConfig {

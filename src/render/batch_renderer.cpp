@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <iostream>
+#include <fstream>
 #include "batch_renderer.hpp"
 #include "shader.hpp"
 #include "ecs_interop.hpp"
@@ -26,7 +28,7 @@ enum class LatestOperation {
 };
 
 namespace consts {
-inline constexpr uint32_t maxDrawsPerLayeredImage = 65536*128;
+inline constexpr uint32_t maxDrawsPerLayeredImage = 65536*256;
 inline constexpr VkFormat colorFormat = VK_FORMAT_R32G32_UINT;
 inline constexpr VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
 inline constexpr VkFormat outputColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1082,6 +1084,7 @@ struct BatchRenderer::Impl {
     vk::MemoryAllocator &mem;
 
     uint32_t maxNumViews;
+    uint32_t numWorlds;
 
     // Resources used in/for rendering the batch output
     // We use anything from double, triple, or whatever we can buffering to save
@@ -1126,6 +1129,7 @@ BatchRenderer::Impl::Impl(const Config &cfg,
     : dev(rctx.dev),
       mem(rctx.alloc),
       maxNumViews(cfg.numWorlds * cfg.maxViewsPerWorld),
+      numWorlds(cfg.numWorlds),
       // This is required whether we want the batch renderer or not
       prepareViews(makeComputePipeline(dev, rctx.pipelineCache, 2,
           sizeof(shader::PrepareViewPushConstant),
@@ -1242,6 +1246,24 @@ BatchRenderer::~BatchRenderer()
         avg_total_time /= (float)impl->recordedTimings.size();
         
         printf("Rasterizer had average %f per frame\n", avg_total_time);
+
+        // Save this to a file
+        auto *output_file_name = getenv("MADRONA_TIMING_FILE");
+        assert(output_file_name);
+        char output_buffer[512] = {};
+
+        sprintf(output_buffer, "{\n  \"num_worlds\":%d\n  \"avg_total_time\":%f,\n}", 
+                (int)impl->numWorlds, avg_total_time);
+
+        printf("%s\n", output_buffer);
+ 
+        std::ofstream stream;
+        stream.open(output_file_name);
+        if (!stream) {
+            std::cout << "Couldn't open file" << std::endl;
+        }
+        stream << output_buffer;
+        stream.close();
     }
 }
 

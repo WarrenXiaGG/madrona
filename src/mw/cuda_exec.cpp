@@ -372,6 +372,9 @@ struct MWCudaExecutor::Impl {
 
     bool enableRaycasting;
     BVHKernels bvhKernels;
+
+    uint32_t numWorlds;
+    uint32_t numVertices;
 };
 
 static void getUserEntries(const char *entry_class, CUmodule mod,
@@ -2183,7 +2186,9 @@ MWCudaExecutor::MWCudaExecutor(const StateConfig &state_cfg,
         std::move(eng_state),
         run_graph,
         enable_raycasting,
-        bvh_kernels
+        bvh_kernels,
+        state_cfg.numWorlds,
+        state_cfg.numVertices
     });
 
     std::cout << "Initialization finished" << std::endl;
@@ -2225,6 +2230,24 @@ MWCudaExecutor::~MWCudaExecutor()
 
         printf("Average BVH kernels time: %f (%f spent in tracing)\n",
                 avg_total_time, avg_trace_time);
+
+        // Save this to a file
+        auto *output_file_name = getenv("MADRONA_TIMING_FILE");
+        assert(output_file_name);
+        char output_buffer[512] = {};
+
+        sprintf(output_buffer, "{\n  \"num_worlds\":%d\n  \"num_vertices\":%d\n  \"avg_total_time\":%f,\n  \"avg_trace_time_ratio\":%f\n}", 
+                (int)impl_->numWorlds, (int)impl_->numVertices, avg_total_time, avg_trace_time / avg_total_time);
+
+        printf("%s\n", output_buffer);
+ 
+        std::ofstream stream;
+        stream.open(output_file_name);
+        if (!stream) {
+            std::cout << "Couldn't open file" << std::endl;
+        }
+        stream << output_buffer;
+        stream.close();
     }
 }
 
