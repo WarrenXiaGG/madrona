@@ -85,7 +85,9 @@ struct alignas(16) MWGPUEntry : MWGPUEntryInstantiate<
 
 extern "C" __global__ void initBVHParams(madrona::BVHParams *params,
                                          uint32_t num_worlds,
-                                         void *internal_data)
+                                         void *internal_data,
+                                         void *bvhs,
+                                         uint32_t num_bvhs)
 {
     using namespace madrona;
     using namespace madrona::render;
@@ -94,6 +96,11 @@ extern "C" __global__ void initBVHParams(madrona::BVHParams *params,
     StateManager *mgr = mwGPU::getStateManager();
     mwGPU::HostAllocator *host_alloc = mwGPU::getHostAllocator();
     mwGPU::TmpAllocator *tmp_alloc = &mwGPU::TmpAllocator::get();
+
+#if 0
+    GPUImplConsts::get().meshBVHsAddr = bvhs;
+    GPUImplConsts::get().numMeshBVHs = num_bvhs;
+#endif
 
     printf("Hello from initBVHParams: %p\n", (void *)params);
 
@@ -123,11 +130,18 @@ extern "C" __global__ void initBVHParams(madrona::BVHParams *params,
     params->mortonCodes = (uint32_t *)mgr->getArchetypeComponent<
         RenderableArchetype, MortonCode>();
 
+    params->bvhs = (render::MeshBVH *)bvhs;
+
+#if 0
     params->bvhModels = (render::BVHModel *)mgr->getArchetypeComponent<
         RenderableArchetype, render::BVHModel>();
+#endif
 
-    params->renderOutput = (render::RenderOutput *)mgr->getArchetypeComponent<
-        RenderCameraArchetype, render::RenderOutput>();
+    params->renderOutput = (void *)mgr->getArchetypeComponent<
+        RaycastOutputArchetype, render::RenderOutputBuffer>();
+
+    params->renderOutputResolution = 
+        mwGPU::GPUImplConsts::get().raycastOutputResolution;
 
     params->internalData = (BVHInternalData *)internal_data;
 

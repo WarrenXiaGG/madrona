@@ -81,6 +81,9 @@ extern "C" __global__ void bvhInit()
 // 2) Optimize the BVH
 extern "C" __global__ void bvhAllocInternalNodes()
 {
+    printf("render resolution %d\n", bvhParams.renderOutputResolution);
+    printf("pixels are at %p\n", bvhParams.renderOutput);
+
     BVHInternalData *internal_data = bvhParams.internalData;
 
     // We need to make sure we have enough internal nodes for the initial
@@ -156,72 +159,6 @@ extern "C" __global__ void bvhAllocInternalNodes()
 #endif
     }
 #endif
-
-
-
-
-#if 0
-    for (int i = 0; i < num_instances; ++i) {
-        render::BVHModel *model = &bvhParams.bvhModels[i];
-        phys::MeshBVH *model_bvh = (phys::MeshBVH *)model->ptr;
-        printf("FAULTY MODEL??? %p: 0x%08x\n", model_bvh, model_bvh->magic);
-    }
-#endif
-
-#if 0
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-    printf("hello\n");
-#endif
-
 
     bvhParams.internalData->numFrames++;
 }

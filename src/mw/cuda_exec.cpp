@@ -1513,6 +1513,9 @@ static GPUEngineState initEngineAndUserState(
     uint32_t num_exported,
     const GPUKernels &gpu_kernels,
     const BVHKernels &bvh_kernels,
+    render::MeshBVH *bvhs_ptr,
+    uint32_t num_bvhs,
+    uint32_t raycast_output_resolution,
     ExecutorMode exec_mode,
     CUdevice cu_gpu,
     CUcontext cu_ctx,
@@ -1584,7 +1587,10 @@ static GPUEngineState initEngineAndUserState(
                                                    num_world_data_bytes,
                                                    world_data_alignment,
                                                    gpu_consts_readback,
-                                                   gpu_state_size_readback);
+                                                   gpu_state_size_readback,
+                                                   (void *)bvhs_ptr,
+                                                   num_bvhs,
+                                                   raycast_output_resolution);
 
     auto init_ecs_args = makeKernelArgBuffer(alloc_init,
                                              host_print->getChannelPtr(),
@@ -1691,7 +1697,8 @@ static GPUEngineState initEngineAndUserState(
     { // Setup the BVH parameters in the __constant__ block of the bvh module
         // Pass this to the ECS to fill in
         auto params_tmp = cu::allocGPU(sizeof(mwGPU::madrona::BVHParams));
-        auto bvh_internals = cu::allocGPU(sizeof(mwGPU::madrona::BVHInternalData));
+        auto bvh_internals = cu::allocGPU(
+                sizeof(mwGPU::madrona::BVHInternalData));
 
         printf("From CPU, bvh params temporary is in %p (data %p)\n", 
                 params_tmp, bvh_internals);
@@ -1704,7 +1711,9 @@ static GPUEngineState initEngineAndUserState(
 
         auto init_bvh_args = makeKernelArgBuffer((void *)params_tmp,
                                                  num_worlds,
-                                                 bvh_internals);
+                                                 bvh_internals,
+                                                 bvhs_ptr,
+                                                 num_bvhs);
 
         // Launch the kernel in the megakernel module to initialize the BVH 
         // params
@@ -1906,6 +1915,7 @@ static CUgraphExec makeTaskGraphRunGraph(
     int64_t num_megakernels,
     BVHKernels &bvh_kernels,
     bool enable_raycasting,
+    uint32_t render_output_resolution,
     int shared_mem_per_sm)
 {
     CUgraph run_graph;
@@ -2061,11 +2071,13 @@ static CUgraphExec makeTaskGraphRunGraph(
 
         const uint32_t num_resident_views_per_sm = 4;
 
+        uint32_t grid_dim = render_output_resolution / 16;
+
         CUDA_KERNEL_NODE_PARAMS bvh_launch_raycast = {
             .func = bvh_kernels.raycast,
             .gridDimX = bvh_kernels.numSMs * num_resident_views_per_sm,
-            .gridDimY = 4,
-            .gridDimZ = 4,
+            .gridDimY = grid_dim,
+            .gridDimZ = grid_dim,
             .blockDimX = 16,
             .blockDimY = 16,
             .blockDimZ = 1,
@@ -2166,7 +2178,11 @@ MWCudaExecutor::MWCudaExecutor(const StateConfig &state_cfg,
         state_cfg.worldDataAlignment, state_cfg.worldInitPtr,
         state_cfg.numWorldInitBytes, state_cfg.userConfigPtr,
         state_cfg.numUserConfigBytes, state_cfg.numExportedBuffers,
-        gpu_kernels, bvh_kernels, exec_mode, cu_gpu, cu_ctx, strm);
+        gpu_kernels, bvh_kernels, 
+        state_cfg.geometryData ? state_cfg.geometryData->meshBVHs : nullptr,
+        state_cfg.geometryData ? state_cfg.geometryData->numBVHs : 0,
+        state_cfg.raycastOutputResolution,
+        exec_mode, cu_gpu, cu_ctx, strm);
 
     auto run_graph =
         exec_mode == ExecutorMode::JobSystem ?
@@ -2178,6 +2194,7 @@ MWCudaExecutor::MWCudaExecutor(const StateConfig &state_cfg,
                                   gpu_kernels.megakernels.size(),
                                   bvh_kernels,
                                   enable_raycasting,
+                                  state_cfg.raycastOutputResolution,
                                   shared_mem_per_sm);
 
     impl_ = std::unique_ptr<Impl>(new Impl {
@@ -2188,7 +2205,7 @@ MWCudaExecutor::MWCudaExecutor(const StateConfig &state_cfg,
         enable_raycasting,
         bvh_kernels,
         state_cfg.numWorlds,
-        state_cfg.numVertices
+        state_cfg.geometryData ? state_cfg.geometryData->numVerts : 0,
     });
 
     std::cout << "Initialization finished" << std::endl;

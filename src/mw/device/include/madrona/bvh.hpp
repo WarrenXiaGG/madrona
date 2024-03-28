@@ -2,6 +2,8 @@
 
 #include <madrona/math.hpp>
 #include <madrona/render/ecs.hpp>
+#include <madrona/components.hpp>
+#include <madrona/mesh_bvh.hpp>
 
 namespace madrona {
 
@@ -90,8 +92,10 @@ struct BVHParams {
     uint32_t *mortonCodes;
     BVHInternalData *internalData;
 
-    render::BVHModel* bvhModels;
-    render::RenderOutput* renderOutput;
+    ::madrona::render::MeshBVH *bvhs;
+
+    void *renderOutput;
+    uint32_t renderOutputResolution;
 
     // These are all going to be inherited from the ECS
     void *hostAllocator;

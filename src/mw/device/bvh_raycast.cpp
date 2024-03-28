@@ -16,9 +16,6 @@ extern "C" __constant__ BVHParams bvhParams;
 
 //BVHParams bvhParams;
 
-constexpr int RAYCAST_WIDTH = 64;
-constexpr int RAYCAST_HEIGHT = 64;
-
 // Trace a ray through the top level structure.
 static __device__ bool traceRayTLAS(uint32_t world_idx,
                                     uint32_t view_idx,
@@ -57,9 +54,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
     LBVHNode *leaves = internal_data->leaves + internal_nodes_offset;
     render::InstanceData *instances = bvhParams.instances + internal_nodes_offset;
 
-    render::BVHModel *bvh_models = bvhParams.bvhModels + internal_nodes_offset;
-
-    phys::TraversalStack stack = {};
+    render::TraversalStack stack = {};
 
     // This starts us at root
     stack.push(1);
@@ -71,7 +66,6 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
         // Can be negative if this is a leaf node
         int32_t node_store_idx = stack.pop();
 
-#if 1
         bool is_leaf = false;
         int32_t node_idx = LBVHNode::storeIdxToChildIdx(node_store_idx, is_leaf);
 
@@ -109,43 +103,13 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                 // intersection we got thus far, try tracing through.
 
                 if (child_is_leaf) {
-#if 1
 
                     // Child node idx is the index of the mesh bvh
                     // LBVHNode *leaf_node = &leaves[child_node_idx];
 
-                    render::BVHModel *model = &bvh_models[child_node_idx];
-                    phys::MeshBVH *model_bvh = (phys::MeshBVH *)model->ptr;
-
-#if 0
-            
-                    printf("%p %u %d %d 0x%08x %p %d\n", 
-                            bvhParams.bvhModels,
-                            num_instances,
-                            internal_nodes_offset,
-                            child_node_idx, model_bvh->magic,
-                            // (void *)model_bvh->nodes,
-                            // model_bvh->nodes[0].parentID,
-                            model_bvh, node_store_idx);
-
-                    printf("%p %u %d %d 0x%08x %p %d\n", 
-                            bvhParams.bvhModels,
-                            num_instances,
-                            internal_nodes_offset,
-                            child_node_idx, model_bvh->magic,
-                            // (void *)model_bvh->nodes,
-                            // model_bvh->nodes[0].parentID,
-                            model_bvh, node_store_idx);
-
-                    printf("%p %u %d %d 0x%08x %p %d\n", 
-                            bvhParams.bvhModels,
-                            num_instances,
-                            internal_nodes_offset,
-                            child_node_idx, model_bvh->magic,
-                            // (void *)model_bvh->nodes,
-                            // model_bvh->nodes[0].parentID,
-                            model_bvh, node_store_idx);
-#endif
+                    // render::BVHModel *model = &bvh_models[child_node_idx];
+                    render::MeshBVH *model_bvh = bvhParams.bvhs +
+                        instances[child_node_idx].objectID;
 
                     render::InstanceData *instance_data = &instances[child_node_idx];
 
@@ -157,7 +121,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     //
                     // Also need to bound the mesh bvh trace ray by t_max.
 
-                    phys::MeshBVH::AABBTransform txfm = {
+                    render::MeshBVH::AABBTransform txfm = {
                         instance_data->position,
                         instance_data->rotation,
                         instance_data->scale
@@ -174,18 +138,11 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
                     txfm_ray_d /= t_scale;
 
-                    // INSPECT("bvh vertices at : %p\n", model_bvh->vertices);
-
-#if 0
-                    printf("BEFORE TRACERAY\n");
-                    printf("BEFORE TRACERAY\n");
-#endif
                     
                     bool leaf_hit = model_bvh->traceRay(txfm_ray_o, txfm_ray_d, &hit_t,
                             &leaf_hit_normal, &stack, txfm, t_max);
 
                     if (leaf_hit) {
-                        // INSPECT("hit\n");
 
                         ray_hit = true;
                         t_max = hit_t * t_scale;
@@ -194,9 +151,8 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                                 instance_data->scale * leaf_hit_normal);
                         closest_hit_normal = closest_hit_normal.normalize();
                     }
-#endif
                 } else {
-                    assert(stack.size < phys::TraversalStack::stackSize);
+                    assert(stack.size < render::TraversalStack::stackSize);
 
                     stack.push(children_indices[i]);
                 }
@@ -204,7 +160,6 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                 // printf("ray failed intersection\n");
             }
         }
-#endif
     }
 
     *out_hit_normal = closest_hit_normal;
@@ -226,6 +181,9 @@ extern "C" __global__ void bvhRaycastEntry()
     const uint32_t resident_view_offset = blockIdx.x;
 
     uint32_t current_view_offset = resident_view_offset;
+
+    uint32_t bytes_per_view =
+        bvhParams.renderOutputResolution * bvhParams.renderOutputResolution * 3;
 
     while (current_view_offset < total_num_views) {
         // While we still have views to generate, trace.
@@ -259,8 +217,8 @@ extern "C" __global__ void bvhRaycastEntry()
         uint32_t pixel_x = blockIdx.y * 16 + threadIdx.x;
         uint32_t pixel_y = blockIdx.z * 16 + threadIdx.y;
 
-        float pixel_u = ((float)pixel_x) / (float)RAYCAST_WIDTH;
-        float pixel_v = ((float)pixel_y) / (float)RAYCAST_HEIGHT;
+        float pixel_u = ((float)pixel_x) / (float)bvhParams.renderOutputResolution;
+        float pixel_v = ((float)pixel_y) / (float)bvhParams.renderOutputResolution;
 
         math::Vector3 ray_dir = lower_left_corner + pixel_u * horizontal + 
             pixel_v * vertical - ray_start;
@@ -277,90 +235,25 @@ extern "C" __global__ void bvhRaycastEntry()
                 ray_start, ray_dir, 
                 &t, &normal, 10000.f);
 
+        uint32_t linear_pixel_idx = 3 * 
+            (pixel_y + pixel_x * bvhParams.renderOutputResolution);
+        uint32_t global_pixel_idx = current_view_offset * bytes_per_view +
+            linear_pixel_idx;
+
+        char *write_out = (char *)bvhParams.renderOutput + global_pixel_idx;
+
         if (hit) {
-            bvhParams.renderOutput[current_view_offset].output[pixel_x][pixel_y][0] =
-                (normal.x * 0.5f + 0.5f) * 255;
-            bvhParams.renderOutput[current_view_offset].output[pixel_x][pixel_y][1] =
-                (normal.y * 0.5f + 0.5f) * 255;
-            bvhParams.renderOutput[current_view_offset].output[pixel_x][pixel_y][2] =
-                (normal.z * 0.5f + 0.5f) * 255;
+            write_out[0] = (normal.x * 0.5f + 0.5f) * 255;
+            write_out[1] = (normal.y * 0.5f + 0.5f) * 255;
+            write_out[2] = (normal.z * 0.5f + 0.5f) * 255;
         } else {
-            bvhParams.renderOutput[current_view_offset].output[pixel_x][pixel_y][0] = 0;
-            bvhParams.renderOutput[current_view_offset].output[pixel_x][pixel_y][1] = 0;
-            bvhParams.renderOutput[current_view_offset].output[pixel_x][pixel_y][2] = 0;
+            write_out[0] = 0;
+            write_out[1] = 0;
+            write_out[2] = 0;
         }
 
         current_view_offset += num_resident_views;
 
-
         __syncthreads();
     }
 }
-
-#if 0
-extern "C" __global__ void bvhRaycastEntry()
-{
-    const int32_t num_views = bvhParams.numWorlds * 2;
-    const int32_t num_views_per_grid = std::ceil(num_views / (float)gridDim.x);
-    int objectRenderIndex = 0;
-    phys::MeshBVH2* bvh = (phys::MeshBVH2*)bvhParams.bvhModels[objectRenderIndex].ptr;
-
-    for(int view_i = 0; view_i < num_views_per_grid; view_i++) {
-        int view = blockIdx.x * num_views_per_grid + view_i;
-        if(view >= num_views){
-            return;
-        }
-        int viewIndex = bvhParams.viewOffsets[view];
-        int32_t idx = threadIdx.x;
-
-        math::Quat rot = bvhParams.views[view].rotation;
-        math::Vector3 ray_start = bvhParams.views[view].position;
-        math::Vector3 look_at = rot.inv().rotateVec({0, 1, 0});
-
-        constexpr float theta = 1.5708f;
-        const float h = tanf(theta / 2);
-        const auto viewport_height = 2 * h;
-        const auto viewport_width = viewport_height;
-        const auto forward = look_at.normalize();
-        auto u = rot.inv().rotateVec({1, 0, 0});
-        auto v = cross(forward, u).normalize();
-        auto horizontal = u * viewport_width;
-        auto vertical = v * viewport_height;
-        auto lower_left_corner = ray_start - horizontal / 2 - vertical / 2 + forward;
-        auto traceRay = [&](int32_t instanceIDX, int32_t idx, int32_t idy, int32_t subthread) {
-            int pixelY = idy;
-            int pixelX = idx;
-            float v = ((float) pixelY) / RAYCAST_WIDTH;
-            float u = ((float) pixelX) / RAYCAST_HEIGHT;
-
-            math::Vector3 ray_dir = lower_left_corner + u * horizontal + v * vertical - ray_start;
-            ray_dir = ray_dir.normalize();
-
-            float t;
-            math::Vector3 normal = {u * 2 - 1, v * 2 - 1, 0};
-            normal = ray_dir;
-
-            // Temporay:
-            phys::TraversalStack stack;
-            stack.size = 0;
-
-            bool hit = bvh->traceRay(ray_start, ray_dir, &t, &normal,
-                                     0, &stack);
-
-            if (hit && subthread == 0) {
-                bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][0] = (normal.x * 0.5f + 0.5f) * 255;
-                bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][1] = (normal.y * 0.5f + 0.5f) * 255;
-                bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][2] = (normal.z * 0.5f + 0.5f) * 255;
-            } else if (subthread == 0) {
-                bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][0] = 0;
-                bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][1] = 0;
-                bvhParams.renderOutput[instanceIDX].output[pixelX][pixelY][2] = 0;
-            }
-        };
-        //printf("Grid : {%d, %d, %d} blocks. Blocks : {%d, %d, %d} threads.\n",
-//gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
-
-        traceRay(view, blockIdx.y * 16 + threadIdx.x, blockIdx.z * 16 + threadIdx.y, 0);
-    }
-}
-#endif

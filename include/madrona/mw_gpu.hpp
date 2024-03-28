@@ -48,7 +48,10 @@ struct StateConfig {
     // Number of exported ECS components
     uint32_t numExportedBuffers;
 
-    uint32_t numVertices;
+    // This is required if the BVH is to be invoked.
+    imp::ImportedAssets::GPUGeometryData *geometryData;
+
+    uint32_t raycastOutputResolution;
 };
 
 struct CompileConfig {

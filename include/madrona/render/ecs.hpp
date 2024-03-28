@@ -1,7 +1,7 @@
 #pragma once
 
-#include <madrona/taskgraph_builder.hpp>
 #include <madrona/math.hpp>
+#include <madrona/taskgraph_builder.hpp>
 
 namespace madrona::render {
 
@@ -50,12 +50,14 @@ struct alignas(16) InstanceData {
     int32_t worldIDX;
 };
 
-struct RenderOutput {
-    uint8_t output[64][64][3];
+// This contains the actual render output
+struct RenderOutputBuffer {
+    char buffer[1];
 };
 
-struct BVHModel {
-    void* ptr;
+// Reference to an output
+struct RenderOutputRef {
+    Entity outputEntity;
 };
 
 // Top level acceleration structure node
@@ -70,7 +72,6 @@ struct RenderableArchetype : public Archetype<
     // For BVH support, we need to sort these not just be world ID,
     // but first by morton code too.
     MortonCode,
-    BVHModel,
 
     TLBVHNode
 > {};
@@ -78,7 +79,12 @@ struct RenderableArchetype : public Archetype<
 // For private usage - not to be used by user.
 struct RenderCameraArchetype : public Archetype<
     PerspectiveCameraData,
-    RenderOutput
+    RenderOutputRef
+> {};
+
+// This is an unsorted archetype with a runtime-sized component
+struct RaycastOutputArchetype : public Archetype<
+    RenderOutputBuffer
 > {};
 
 

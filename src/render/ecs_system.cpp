@@ -5,6 +5,10 @@
 
 #include "ecs_interop.hpp"
 
+#ifdef MADRONA_GPU_MODE
+#include <madrona/mw_gpu/const.hpp>
+#endif
+
 namespace madrona::render::RenderingSystem {
 using namespace base;
 using namespace math;
@@ -28,6 +32,9 @@ struct RenderingSystemState {
     // Also only used when on the CPU backend
     uint64_t *instanceWorldIDsCPU;
     uint64_t *viewWorldIDsCPU;
+
+    MeshBVH *bvhs;
+    uint32_t numBVHs;
 };
 
 inline uint32_t leftShift3(uint32_t x)
@@ -55,6 +62,8 @@ inline void mortonCodeUpdate(Context &ctx,
                              const Position &pos,
                              const Renderable &renderable)
 {
+    (void)e;
+
     // Calculate and set the morton code
     MortonCode &morton_code = ctx.get<MortonCode>(renderable.renderEntity);
     morton_code = encodeMorton3(pos);
@@ -95,21 +104,16 @@ inline void instanceTransformUpdate(Context &ctx,
 
     // Get the root AABB from the model and translate it to store
     // it in the TLBVHNode structure.
-    BVHModel &model = ctx.get<BVHModel>(renderable.renderEntity);
 
-    phys::MeshBVH *bvh = (phys::MeshBVH *)model.ptr;
+#ifdef MADRONA_GPU_MODE
+    render::MeshBVH *bvh = (render::MeshBVH *)
+        mwGPU::GPUImplConsts::get().meshBVHsAddr +
+        obj_id.idx;
 
     math::AABB aabb = bvh->rootAABB.applyTRS(
             data.position, data.rotation, data.scale);
 
     ctx.get<TLBVHNode>(renderable.renderEntity).aabb = aabb;
-
-#if 0
-    printf("(%d) %f %f %f -> %f %f %f (position is %f %f %f)\n",
-            renderable.renderEntity.id,
-            aabb.pMin.x, aabb.pMin.y, aabb.pMin.z,
-            aabb.pMax.x, aabb.pMax.y, aabb.pMax.z,
-            pos.x, pos.y, pos.z);
 #endif
 }
 
@@ -210,15 +214,25 @@ void registerTypes(ECSRegistry &registry,
 {
     printf("Printing from rendering system register types\n");
 
+#ifdef MADRONA_GPU_MODE
+    uint32_t render_output_res = 
+        mwGPU::GPUImplConsts::get().raycastOutputResolution;
+    uint32_t render_output_bytes = render_output_res * render_output_res * 3;
+#else
+    uint32_t render_output_bytes = 4;
+#endif
+
     registry.registerComponent<RenderCamera>();
     registry.registerComponent<Renderable>();
     registry.registerComponent<PerspectiveCameraData>();
     registry.registerComponent<InstanceData>();
     registry.registerComponent<MortonCode>();
+    registry.registerComponent<RenderOutputBuffer>(render_output_bytes);
 
-    registry.registerComponent<RenderOutput>();
-    registry.registerComponent<BVHModel>();
+    registry.registerComponent<RenderOutputRef>();
     registry.registerComponent<TLBVHNode>();
+
+    registry.registerArchetype<RaycastOutputArchetype>();
 
 
     // Pointers get set in RenderingSystem::init
@@ -303,6 +317,8 @@ TaskGraphNodeID setupTasks(TaskGraphBuilder &builder,
             Renderable
         >>({viewdata_update});
 
+    (void)mortoncode_update;
+
 #ifdef MADRONA_GPU_MODE
     // Need to sort the instances, as well as the views
     auto sort_instances_by_morton =
@@ -381,7 +397,9 @@ void attachEntityToView(Context &ctx,
     float fov_scale = 1.0f / tanf(toRadians(vfov_degrees * 0.5f));
 
     Entity camera_entity = ctx.makeEntity<RenderCameraArchetype>();
-    ctx.get<RenderCamera>(e) = { camera_entity, fov_scale, z_near, camera_offset };
+    ctx.get<RenderCamera>(e) = { 
+        camera_entity, fov_scale, z_near, camera_offset 
+    };
 
     PerspectiveCameraData &cam_data = 
         ctx.get<PerspectiveCameraData>(camera_entity);
@@ -399,6 +417,13 @@ void attachEntityToView(Context &ctx,
         ctx.worldID().idx,
         0 // Padding
     };
+
+    Entity render_output_entity = ctx.makeEntity<RaycastOutputArchetype>();
+
+    RenderOutputRef &ref = ctx.get<RenderOutputRef>(camera_entity);
+    ref.outputEntity = render_output_entity;
+
+    printf("attached entity to output %d\n", render_output_entity.id);
 }
 
 void cleanupViewingEntity(Context &ctx,

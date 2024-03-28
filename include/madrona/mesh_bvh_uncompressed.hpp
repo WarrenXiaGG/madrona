@@ -1,16 +1,24 @@
 #pragma once
 
-#include "types.hpp"
-#include "geo.hpp"
+#include <madrona/types.hpp>
+#include <madrona/geo.hpp>
 
-#ifdef MADRONA_GPU_MODE
-#include <madrona/mw_gpu/host_print.hpp>
-#endif
+namespace madrona::render {
 
-namespace madrona::phys {
+struct TriangleIndices {
+    uint32_t indices[3];
+};
+
+enum class CollisionFlags : uint64_t {
+    BlocksRaycasts = 1 << 0,
+};
+
+struct CollisionMaterial {
+    CollisionFlags flags;
+};
 
 struct TraversalStack {
-    static constexpr CountT stackSize = 32;
+    static constexpr CountT stackSize = 40;
 
     int32_t s[stackSize];
     CountT size;
@@ -27,25 +35,19 @@ struct TraversalStack {
     }
 };
 
-struct MeshBVH2 {
+struct MeshBVHUncompressed {
     static constexpr inline CountT numTrisPerLeaf = 8;
     static constexpr inline CountT nodeWidth = 4;
     static constexpr inline int32_t sentinel = (int32_t)0xFFFF'FFFF;
+    static constexpr inline uint32_t magicSignature = 0x69426942;
 
     struct Node {
-        float minX;
-        float minY;
-        float minZ;
-        int8_t expX;
-        int8_t expY;
-        int8_t expZ;
-        uint8_t internalNodes;
-        uint8_t qMinX[nodeWidth];
-        uint8_t qMinY[nodeWidth];
-        uint8_t qMinZ[nodeWidth];
-        uint8_t qMaxX[nodeWidth];
-        uint8_t qMaxY[nodeWidth];
-        uint8_t qMaxZ[nodeWidth];
+        float minX[nodeWidth];
+        float minY[nodeWidth];
+        float minZ[nodeWidth];
+        float maxX[nodeWidth];
+        float maxY[nodeWidth];
+        float maxZ[nodeWidth];
         int32_t children[nodeWidth];
         int32_t parentID;
 
@@ -59,7 +61,7 @@ struct MeshBVH2 {
     };
 
     struct LeafGeometry {
-        uint64_t packedIndices[numTrisPerLeaf];
+        TriangleIndices packedIndices[numTrisPerLeaf];
     };
 
     struct LeafMaterial {
@@ -94,8 +96,6 @@ struct MeshBVH2 {
                          math::Vector3 ray_d,
                          float *out_hit_t,
                          math::Vector3 *out_hit_normal,
-                         void* shared,
-                         TraversalStack *stack,
                          float t_max = float(FLT_MAX)) const;
 
     // Apply this transform onto the root AABB
@@ -109,7 +109,6 @@ struct MeshBVH2 {
                          math::Vector3 ray_d,
                          float *out_hit_t,
                          math::Vector3 *out_hit_normal,
-                         void* shared,
                          TraversalStack *stack,
                          const AABBTransform &txfm,
                          float t_max = float(FLT_MAX)) const;
@@ -128,14 +127,6 @@ struct MeshBVH2 {
         float *out_hit_t,
         math::Vector3 *out_hit_normal) const;
 
-    inline bool traceRayLeafIndexed(int32_t leaf_idx,
-                           int32_t i,
-                           MeshBVH2::RayIsectTxfm tri_isect_txfm,
-                           math::Vector3 ray_o,
-                           float t_max,
-                           float *out_hit_t,
-                           math::Vector3 *out_hit_normal) const;
-
     inline bool rayTriangleIntersection(
         math::Vector3 tri_a, math::Vector3 tri_b, math::Vector3 tri_c,
         int32_t kx, int32_t ky, int32_t kz,
@@ -151,12 +142,9 @@ struct MeshBVH2 {
                                   math::Vector3 *b,
                                   math::Vector3 *c) const;
 
-    static inline RayIsectTxfm computeRayIsectTxfm(
-        math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d,
-        math::AABB root_aabb);
-
     inline RayIsectTxfm computeRayIsectTxfm(
-        math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d) const;
+        math::Vector3 o, math::Vector3 d, math::Diag3x3 inv_d,
+        const math::AABB &root_aabb) const;
 
     inline bool sphereCastNodeCheck(math::Vector3 ray_o,
                                     math::Diag3x3 inv_d,
@@ -183,15 +171,16 @@ struct MeshBVH2 {
     Node *nodes;
     LeafGeometry *leafGeos;
     LeafMaterial *leafMats;
-
     math::Vector3 *vertices;
 
     math::AABB rootAABB;
     uint32_t numNodes;
     uint32_t numLeaves;
     uint32_t numVerts;
+
+    uint32_t magic;
 };
 
 }
 
-#include "mesh_bvh3.inl"
+#include "mesh_bvh_uncompressed.inl"
