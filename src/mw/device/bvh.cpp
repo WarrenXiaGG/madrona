@@ -37,11 +37,24 @@ struct ConstructAABBBuffer {
     char buffer[1];
 };
 
-// For optimizing the initial BVH build with treelet rotations.
-struct OptFastBuffer {
-    uint32_t blockNodeOffset;
-    uint32_t totalNumInstances;
-    char buffer[1];
+// After the initial treelets get formed, we might have to prune certain
+// leaves because each treelet may initially have more than
+// MADRONA_TREELET_SIZE nodes.
+struct InitialTreelet {
+    int32_t rootIndex;
+    int32_t worldIndex;
+    int32_t numLeaves;
+};
+
+struct FormedTreelet {
+    uint32_t rootIndex;
+    uint32_t worldIndex;
+    int32_t leaves[MADRONA_TREELET_SIZE];
+};
+
+union Treelet {
+    InitialTreelet initial;
+    FormedTreelet formed;
 };
 
 struct OptFastBufferTreelets {
@@ -50,14 +63,7 @@ struct OptFastBufferTreelets {
     AtomicU32 treeletCounter;
 
     // Stores the treelets
-    char buffer[1];
-};
-
-// After the initial treelets get formed, we might have to prune certain
-// leaves because each treelet may initially have more than
-// MADRONA_TREELET_SIZE nodes.
-struct InitialTreelet {
-    int32_t rootIndex;
+    Treelet buffer[1];
 };
 
 }
@@ -84,6 +90,10 @@ extern "C" __global__ void bvhAllocInternalNodes()
     printf("render resolution %d\n", bvhParams.renderOutputResolution);
     printf("pixels are at %p\n", bvhParams.renderOutput);
 
+    bvhParams.timingInfo->timingCounts.store_relaxed(0);
+    bvhParams.timingInfo->tlasTime.store_relaxed(0);
+    bvhParams.timingInfo->blasTime.store_relaxed(0);
+
     BVHInternalData *internal_data = bvhParams.internalData;
 
     // We need to make sure we have enough internal nodes for the initial
@@ -94,17 +104,13 @@ extern "C" __global__ void bvhAllocInternalNodes()
     // For the 2-wide tree, we need about num_instances internal nodes
     uint32_t num_required_nodes = num_instances;
     uint32_t num_bytes = num_required_nodes * 
-        (2 * sizeof(LBVHNode) + sizeof(TreeletFormationNode));
+        (2 * sizeof(LBVHNode) + sizeof(TreeletFormationNode) +
+         sizeof(uint32_t));
 
     mwGPU::TmpAllocator *allocator = (mwGPU::TmpAllocator *)
         bvhParams.tmpAllocator;
 
     auto *ptr = allocator->alloc(num_bytes);
-#if 0
-    printf("From allocInternalNode: tmp allocated: %p\n", ptr);
-    printf("From allocInternalNode: internal data at: %p\n", internal_data);
-    printf("There are %d total instances\n", (int32_t)num_instances);
-#endif
 
     internal_data->internalNodes = (LBVHNode *)ptr;
     internal_data->numAllocatedNodes = num_required_nodes;
@@ -119,46 +125,11 @@ extern "C" __global__ void bvhAllocInternalNodes()
     internal_data->treeletFormNodes = (TreeletFormationNode *)
         ((char *)ptr + 2 * num_required_nodes * sizeof(LBVHNode));
 
-#if defined(MADRONA_DEBUG_TEST)
-    // We are going to set up a test case here from the paper
-    uint32_t *codes = bvhParams.mortonCodes;
+    internal_data->treeletRootIndices = (uint32_t *)
+        ((char *)ptr + 2 * num_required_nodes * sizeof(LBVHNode)
+                     + num_required_nodes * sizeof(TreeletFormationNode));
 
-    codes[0] = 1;
-    codes[1] = 3;
-    codes[2] = 11;
-    codes[3] = 19;
-    codes[4] = 25;
-    codes[5] = 39;
-    codes[6] = 57;
-    codes[7] = 90;
-    codes[8] = 121;
-    codes[9] = 251;
-    codes[10] = 253;
-
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+0] = 1;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+1] = 3;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+2] = 11;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+3] = 19;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+4] = 25;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+5] = 39;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+6] = 57;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+7] = 90;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+8] = 121;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+9] = 251;
-    codes[MADRONA_DEBUG_TEST_NUM_LEAVES+10] = 253;
-
-    for (int i = 0; i < MADRONA_DEBUG_TEST_NUM_LEAVES; ++i) {
-        uint32_t code = codes[i];
-#if 0
-        printf(USHORT_TO_BINARY_PATTERN " ", USHORT_TO_BINARY((code>>16)));
-        printf(USHORT_TO_BINARY_PATTERN " \t", USHORT_TO_BINARY((code)));
-
-        printf("(Leaf node %d): \t (%d)\n", 
-                i, 
-                codes[i]);
-#endif
-    }
-#endif
+    internal_data->treeletRootIndexCounter.store_relaxed(0);
 
     bvhParams.internalData->numFrames++;
 }
@@ -208,12 +179,6 @@ extern "C" __global__ void bvhBuildFast()
         return;
     }
 
-#if defined(MADRONA_DEBUG_TEST)
-    if (thread_offset >= 2 * MADRONA_DEBUG_TEST_NUM_LEAVES) {
-        return;
-    }
-#endif
-
     // Load a bunch of morton codes into shared memory.
     //
     // TODO: Profile the difference between directly loading the morton codes
@@ -240,18 +205,6 @@ extern "C" __global__ void bvhBuildFast()
     world_info.numInternalNodes = world_info.numLeaves - 1;
     world_info.internalNodesOffset = bvhParams.instanceOffsets[world_info.idx];
 
-#if defined(MADRONA_DEBUG_TEST)
-    world_info.idx = 0;
-    world_info.numLeaves = MADRONA_DEBUG_TEST_NUM_LEAVES;
-    world_info.numInternalNodes = MADRONA_DEBUG_TEST_NUM_LEAVES-1;
-    world_info.internalNodesOffset = 0;
-    
-    if (thread_offset >= MADRONA_DEBUG_TEST_NUM_LEAVES) {
-        world_info.internalNodesOffset = MADRONA_DEBUG_TEST_NUM_LEAVES;
-        world_info.idx = 1;
-    }
-#endif
-
     // The offset into the nodes of the world this thread is dealing with
     int32_t tn_offset = thread_offset - world_info.internalNodesOffset;
 
@@ -260,6 +213,8 @@ extern "C" __global__ void bvhBuildFast()
                       world_info.internalNodesOffset;
     LBVHNode *leaves = internal_data->leaves + 
                        world_info.internalNodesOffset;
+    TreeletFormationNode *treelet_form_nodes = internal_data->treeletFormNodes +
+                                               world_info.internalNodesOffset;
 
     nodes[tn_offset].left = 0;
     nodes[tn_offset].right = 0;
@@ -311,15 +266,6 @@ extern "C" __global__ void bvhBuildFast()
 
     int32_t other_end = tn_offset + true_length * direction;
 
-#if defined (MADRONA_DEBUG_TEST)
-    printf("tn_offset %d: direction=%d = %d - %d | true_length %d | other_end %d\n", 
-            tn_offset, direction,
-            llcp_nodes(tn_offset, tn_offset+1),
-            llcp_nodes(tn_offset, tn_offset-1),
-            true_length,
-            other_end);
-#endif
-
     // The number of common bits for all leaves coming out of this node
     int32_t node_llcp = llcp_nodes(tn_offset, other_end);
 
@@ -345,10 +291,6 @@ extern "C" __global__ void bvhBuildFast()
         nodes[tn_offset].left = LBVHNode::childIdxToStoreIdx(split_index, true);
         nodes[tn_offset].reachedCount.store_relaxed(0);
 
-        if (tn_offset == 0) {
-            // printf("REAL Parent is root! %p\n", &leaves[split_index]);
-        }
-
         leaves[split_index].parent = tn_offset;
         uint32_t instance_idx = (leaves[split_index].instanceIdx = split_index +
             world_info.internalNodesOffset);
@@ -360,10 +302,6 @@ extern "C" __global__ void bvhBuildFast()
         nodes[tn_offset].left = LBVHNode::childIdxToStoreIdx(split_index, false);
         nodes[tn_offset].reachedCount.store_relaxed(0);
         nodes[split_index].parent = tn_offset;
-
-        if (tn_offset == 0) {
-            // printf("REAL Parent is root! %p\n", &nodes[split_index]);
-        }
     }
     
     if (right_index == split_index + 1) {
@@ -376,20 +314,15 @@ extern "C" __global__ void bvhBuildFast()
             world_info.internalNodesOffset);
         leaves[split_index+1].aabb = bvhParams.aabbs[instance_idx].aabb;
         leaves[split_index+1].reachedCount.store_relaxed(0);
-
-        if (tn_offset == 0) {
-            // printf("REAL Parent is root! %p\n", &leaves[split_index+1]);
-        }
     } else {
         // The right node is an internal node and its index is split_index+1
         nodes[tn_offset].right = LBVHNode::childIdxToStoreIdx(split_index + 1, false);
         nodes[tn_offset].reachedCount.store_relaxed(0);
         nodes[split_index + 1].parent = tn_offset;
-
-        if (tn_offset == 0) {
-            // printf("REAL Parent is root! %p\n", &nodes[split_index+1]);
-        }
     }
+
+    treelet_form_nodes[tn_offset].numLeaves.store_relaxed(0);
+    treelet_form_nodes[tn_offset].numReached.store_relaxed(0);
 }
 
 // Constructs the internal nodes' AABBs
@@ -450,10 +383,6 @@ extern "C" __global__ void bvhConstructAABBs()
     // If the value before the add is 0, then we are the first to hit this node.
     // => we need to break out of the loop.
     while (current->reachedCount.fetch_add_release(1) == 1) {
-        if (current->parent == 0) {
-            // printf("Parent is root! %p (%p)\n", current, internal_nodes);
-        }
-
         // Merge the AABBs of the children nodes. (Store like this for now to
         // help when we make the tree 4 wide or 8 wide.
         LBVHNode *children[2];
@@ -499,15 +428,12 @@ extern "C" __global__ void bvhConstructAABBs()
         for (int i = 0; i < 2; ++i) {
             LBVHNode *node = children[i];
 
-
             if (node) {
                 if (!got_valid_node) {
                     got_valid_node = true;
                     merged_aabb = node->aabb;
                 } else {
                     merged_aabb = math::AABB::merge(node->aabb, merged_aabb);
-#if 1
-#endif
                 }
             }
         }
@@ -515,13 +441,6 @@ extern "C" __global__ void bvhConstructAABBs()
         current->aabb = merged_aabb;
 
         if (current->parent == 0xFFFF'FFFF) {
-#if 0
-            printf("%p, %f %f %f -> %f %f %f\n",
-                    current,
-                    merged_aabb.pMin.x, merged_aabb.pMin.y, merged_aabb.pMin.z,
-                    merged_aabb.pMax.x, merged_aabb.pMax.y, merged_aabb.pMax.z);
-#endif
-
             break;
         } else {
             // Parent is 0 indexed so no problem just indexing 
@@ -531,6 +450,198 @@ extern "C" __global__ void bvhConstructAABBs()
     }
 }
 
+#if 0
+// Phase 1 of the optimization kernel:
+// Find the first treelet roots which expand to treelets with at least 7
+// leaf nodes. All these potential treelets will be pushed to a global
+// buffer which will then be pulled from in the next stage by each warp
+// for processing.
+// Takes in the node at which this thread will start searching upwards the tree
+static __device__ inline void pushPotentialRoots(uint32_t start_search_idx,
+                                                 uint32_t total_num_instances,
+                                                 uint32_t num_resident_threads)
+{
+    BVHInternalData *internal_data = bvhParams.internalData;
+
+    struct {
+        uint32_t idx;
+        uint32_t numInternalNodes;
+        uint32_t internalNodesOffset;
+        uint32_t numLeaves;
+        LBVHNode *leaves;
+        LBVHNode *internalNodes;
+        TreeletFormationNode *treeletFormNodes;
+    } world_info;
+
+    auto update_world_info = [&world_info](uint32_t start_search_idx) {
+        world_info.idx = bvhParams.instances[start_search_idx].worldIDX;
+        world_info.numLeaves = bvhParams.instanceCounts[world_info.idx];
+        world_info.numInternalNodes = world_info.numLeaves - 1;
+        world_info.internalNodesOffset = bvhParams.instanceOffsets[world_info.idx];
+        world_info.leaves = internal_data->leaves + world_info.internalNodesOffset;
+        world_info.internalNodes = internal_data->internalNodes +
+            world_info.internalNodesOffset;
+        world_info.treeletFormNodes = internal_data->treeletFormNodes +
+            world_info.internalNodesOffset;
+    };
+
+    update_world_info(start_search_idx);
+
+    // This thread's leaf (tn_offset = thread node offset)
+    uint32_t tn_offset = start_search_idx - world_info.internalNodesOffset;
+    LBVHNode *current = &world_info.leaves[tn_offset];
+    uint32_t num_leaves = 1;
+
+    // Only the threads which survived push their treelets to shared memory
+    // (phase 2 shared memory layout).
+    sm::OptFastBufferTreelets *smem_p2 = 
+        (sm::OptFastBufferTreelets *)sm::buffer;
+    sm::Treelet *treelets_buffer = (sm::Treelet *)
+        smem_p2->buffer;
+
+    // TODO: Find break condition here
+    while (start_search_idx < total_num_instances) {
+        int32_t parent = current->parent;
+
+        LBVHNode *parent_node = world_info.internalNodes + parent;
+        TreeletFormationNode *parent_form = world_info.treeletFormNodes + parent;
+
+        parent_form->numLeaves.fetch_add_release(num_leaves);
+
+        if (parent_form->numReached.exchange<
+                sync::memory_order::relaxed>(1) == 0) {
+            // Suspend this thread if this is the first thread to reach this node.
+            // However, if this is the first thread to reach this node but this
+            // node only has one child, don't suspend.
+            if (parent_node->numChildren() == 2) {
+                start_search_idx += num_resident_threads;
+                update_world_info(start_search_idx);
+
+                tn_offset = start_search_idx - world_info.internalNodesOffset;
+                current = &world_info.leaves[tn_offset];
+                num_leaves = 1;
+                
+                continue;
+            }
+        }
+
+        // When adding the amount of leaves, exclude what was just
+        // added by this thread
+        num_leaves += (parent_form->numLeaves.load_acquire() - num_leaves);
+        current = &world_info.internalNodes[parent];
+
+        if (num_leaves > MADRONA_TREELET_SIZE) {
+            // Push a potential treelet!
+            sm::InitialTreelet initial_treelet = {
+                .rootIndex = tn_offset,
+                .worldIndex = world_info.idx,
+                .numLeaves = num_leaves
+            };
+
+            int32_t treelet_idx =
+                (int32_t)smem_p2->treeletCounter.fetch_add_relaxed(1);
+
+            treelets_buffer[treelet_idx].initial = initial_treelet;
+
+            // Start a new search
+            start_search_idx += num_resident_threads;
+            update_world_info(start_search_idx);
+
+            tn_offset = start_search_idx - world_info.internalNodesOffset;
+            current = &world_info.leaves[tn_offset];
+            num_leaves = 1;
+        }
+    }
+}
+
+static __device__ inline void formTreelet(uint32_t treelet_idx)
+{
+    BVHInternalData *internal_data = bvhParams.internalData;
+
+    uint32_t lane_idx = threadIdx.x % MADRONA_WARP_SIZE;
+
+    sm::OptFastBufferTreelets *smem = (sm::OptFastBufferTreelets *)sm::buffer;
+    sm::Treelet *treelets = (sm::Treelet *)smem->buffer;
+
+    // Only one thread of the warp actually does the treelet formation
+    if (lane_idx == 0) {
+        sm::InitialTreelet *initial = &treelets[treelet_idx].initial;
+
+        uint32_t internal_nodes_offset = 
+            bvhParams.instanceOffsets[initial->worldIndex];
+        LBVHNode *internal_nodes = internal_data->internalNodes +
+            internal_nodes_offset;
+        LBVHNode *leaf_nodes = internal_data->leaves + internal_nodes_offset;
+
+        sm::FormedTreelet formed_treelet = {
+            .rootIndex = initial->rootIndex,
+            .worldIndex = initial->worldIndex
+        };
+
+        LBVHNode *current_node = &internal_nodes[formed_treelet.rootIndex];
+        uint32_t num_leaves = 2;
+        formed_treelet.leaves[0] = current_node->left;
+        formed_treelet.leaves[1] = current_node->right;
+        
+        while (num_leaves < MADRONA_TREELET_SIZE) {
+            int32_t argmax_sah = -1;
+            float max_sah = -FLT_MAX;
+
+            // Loop through the leaves and figure out which has the largest SAH
+            // NOTE: you can only replace nodes which are in reality internal
+            // nodes. Actual leaves cannot be replaced by their children
+            // because they don't have children.
+            for (int i = 0; i < num_leaves; ++i) {
+                bool is_leaf;
+                int32_t child_idx = LBVHNode::storeIdxToChildIdx(
+                        formed_treelet.leaves[i], is_leaf);
+
+                if (is_leaf)
+                    continue;
+
+                LBVHNode *node = &internal_nodes[child_idx];
+                if (node->sah() > max_sah) {
+                    argmax_sah = i;
+                    max_sah = node->sah();
+                }
+            }
+
+            // Now, replace the node with maximum sah with its 2 children.
+            // This should NEVER fail
+            assert(argmax_sah != -1);
+
+            LBVHNode *replaced_node = &internal_nodes[
+                formed_treelet.leaves[argmax_sah]];
+
+            // Normally, after each iteration of the while loop, the number of
+            // leaves should increase by 1 (until we reach MADRONA_TREELET_SIZE)
+            formed_treelet.leaves[argmax_sah] = replaced_node->left;
+            formed_treelet.leaves[num_leaves++] = repalced_node->right;
+        }
+
+        // Override the bytes in the Treelet struct to reflect the final
+        // formed treelet.
+        treelets[treelet_idx].formed = formed_treelet;
+    }
+}
+
+template <typename T, uint32_t N>
+struct WarpRegisterFile
+{
+    static constexpr uint32_t kNumItemsPerLane = 
+        (N + MADRONA_WARP_SIZE - 1) / MADRONA_WARP_SIZE;
+
+    T items[kNumItemsPerLane];
+
+    T operator[](uint32_t index)
+    {
+        const uint32_t lane_id = index / kNumItemsPerLane;
+        const uint32_t sub_array_idx = index % kNumItemsPerLane;
+        return __shlf_sync(0xFFFF'FFFF, items[sub_array_idx], lane_id);
+    }
+};
+#endif
+
 // Each warp will maintain a single treelet
 extern "C" __global__ void bvhOptimizeLBVH()
 {
@@ -538,28 +649,19 @@ extern "C" __global__ void bvhOptimizeLBVH()
     BVHInternalData *internal_data = bvhParams.internalData;
 
     // Phase 1 shared memory layout
-    sm::OptFastBuffer *smem_p1 = (sm::OptFastBuffer *)sm::buffer;
+    sm::OptFastBufferTreelets *smem = (sm::OptFastBufferTreelets *)sm::buffer;
     
     const uint32_t threads_per_block = blockDim.x;
     const uint32_t warps_per_block = threads_per_block / MADRONA_WARP_SIZE;
+    const uint32_t num_resident_blocks = gridDim.x;
+    const uint32_t num_resident_threads = threads_per_block * num_resident_blocks;
 
     if (threadIdx.x == 0) {
-        uint32_t tb_node_offset = internal_data->optFastAccumulator.fetch_add<
-            sync::memory_order::relaxed>(threads_per_block);
         uint32_t num_instances = bvhParams.instanceOffsets[bvhParams.numWorlds-1] +
                                  bvhParams.instanceCounts[bvhParams.numWorlds-1];
-
-        smem_p1->blockNodeOffset = tb_node_offset;
-        smem_p1->totalNumInstances = num_instances;
-    }
-
-    __syncthreads();
-
-    if (threadIdx.x < smem_p1->totalNumInstances) {
-        internal_data->treeletFormNodes[threadIdx.x].numLeaves.store<
-            sync::memory_order::relaxed>(0);
-        internal_data->treeletFormNodes[threadIdx.x].numReached.store<
-            sync::memory_order::relaxed>(0);
+        smem->totalNumInstances = num_instances;
+        smem->treeletCounter.store_relaxed(0);
+        smem->consumerCounter.store_relaxed(0);
     }
 
     __syncthreads();
@@ -567,111 +669,37 @@ extern "C" __global__ void bvhOptimizeLBVH()
     // For this section, we want all threads who's `thread_inst_offset` is
     // beyond the range of allocated instances to lay dormant and wait
     // until all the treelets have been formed.
-    uint32_t thread_inst_offset = smem_p1->blockNodeOffset + threadIdx.x;
+    uint32_t thread_inst_offset = blockIdx.x * threads_per_block + threadIdx.x;
+    uint32_t total_num_instances = smem->totalNumInstances;
 
-    if (thread_inst_offset < smem_p1->totalNumInstances) {
-        [&]() {
-            struct {
-                uint32_t idx;
-                uint32_t numInternalNodes;
-                uint32_t internalNodesOffset;
-                uint32_t numLeaves;
-                LBVHNode *leaves;
-                LBVHNode *internalNodes;
-                TreeletFormationNode *treeletFormNodes;
-            } world_info;
-
-            world_info.idx = bvhParams.instances[thread_inst_offset].worldIDX;
-            world_info.numLeaves = bvhParams.instanceCounts[world_info.idx];
-            world_info.numInternalNodes = world_info.numLeaves - 1;
-            world_info.internalNodesOffset = bvhParams.instanceOffsets[world_info.idx];
-            world_info.leaves = internal_data->leaves + world_info.internalNodesOffset;
-            world_info.internalNodes = internal_data->internalNodes +
-                world_info.internalNodesOffset;
-            world_info.treeletFormNodes = internal_data->treeletFormNodes +
-                world_info.internalNodesOffset;
-
-            // This thread's leaf (tn_offset = thread node offset)
-            uint32_t tn_offset = thread_inst_offset - world_info.internalNodesOffset;
-            LBVHNode *current = &world_info.leaves[tn_offset];
-            uint32_t num_leaves = 1;
-
-            // Only the threads which survived push their treelets to shared memory
-            // (phase 2 shared memory layout).
-            sm::OptFastBufferTreelets *smem_p2 = 
-                (sm::OptFastBufferTreelets *)sm::buffer;
-            sm::InitialTreelet *treelets_buffer = (sm::InitialTreelet *)
-                smem_p2->buffer;
-
-            int32_t treelet_idx = -1;
-            sm::InitialTreelet initial_treelet = {};
-
-            // TODO: Find break condition here
-            while (num_leaves < MADRONA_TREELET_SIZE) {
-                int32_t parent = current->parent;
-
-                TreeletFormationNode *parent_form = world_info.treeletFormNodes + parent;
-                parent_form->numLeaves.fetch_add_release(num_leaves);
-
-                if (parent_form->numReached.exchange<
-                        sync::memory_order::relaxed>(1) == 0) {
-                    // Suspend this thread
-                    return;
-                } else {
-                    num_leaves += parent_form->numLeaves.load_acquire();
-                    current = &world_info.internalNodes[parent];
-                }
-            }
-
-            treelet_idx = (int32_t)smem_p2->treeletCounter.fetch_add_relaxed(1);
-
-            initial_treelet = sm::InitialTreelet {
-                // `current` will be relative to the world_inodes array after treelet
-                // formation happens
-                .rootIndex = (int32_t)(current - world_info.internalNodes)
-            };
-
-            treelets_buffer[treelet_idx] = initial_treelet;
-
-            printf("Formed treelet of size %d\n", num_leaves);
-        }();
-    }
+    // Push potential roots to shared memory buffer.
+    pushPotentialRoots(thread_inst_offset, 
+                       total_num_instances,
+                       num_resident_threads);
 
     __syncthreads();
 
-    // Now, we post process the treelets so as to just have 7 leaf nodes
-    // in the treelet.
+    // Now, each warp is going to process a single treelet
+    uint32_t warp_idx = threadIdx.x / MADRONA_WARP_SIZE;
+    uint32_t lane_idx = threadIdx.x % MADRONA_WARP_SIZE;
+    uint32_t num_treelets = smem->treeletCounter.load_relaxed();
+
+    for (uint32_t treelet_idx = warp_idx; 
+            treelet_idx < num_treelets;
+            treelet_idx += warps_per_block) {
+        // First, form the treelet of size MADRONA_TREELET_SIZE
+        formTreelet(treelet_idx);
+
+        // Make the treelet as optimal as possible
+
+
+        __syncwarp();
+    }
+
 #endif
 }
 
 extern "C" __global__ void bvhDebug()
 {
-#if 0
-#if 1
-    BVHInternalData *internal_data = bvhParams.internalData;
-
-    uint32_t num_instances = bvhParams.instanceOffsets[bvhParams.numWorlds-1] +
-                             bvhParams.instanceCounts[bvhParams.numWorlds-1];
-
-#if defined(MADRONA_DEBUG_TEST)
-    for (int i = 0; i < MADRONA_DEBUG_TEST_NUM_LEAVES; ++i) {
-#else
-    for (int i = 0; i < num_instances; ++i) {
-#endif
-        render::InstanceData &instance_data = bvhParams.instances[i];
-        LBVHNode *node = &internal_data->internalNodes[i];
-        uint32_t offset = bvhParams.instanceOffsets[instance_data.worldIDX];
-
-        (void)node;
-        (void)offset;
-
-#if 0
-        printf("(Internal node %d) %d: left: %d, right: %d\n",
-               i - offset,
-               instance_data.worldIDX,
-               node->left, node->right);
-#endif
-    }
-#endif
-#endif
 }
+

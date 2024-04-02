@@ -87,7 +87,8 @@ extern "C" __global__ void initBVHParams(madrona::BVHParams *params,
                                          uint32_t num_worlds,
                                          void *internal_data,
                                          void *bvhs,
-                                         uint32_t num_bvhs)
+                                         uint32_t num_bvhs,
+                                         void *timings)
 {
     using namespace madrona;
     using namespace madrona::render;
@@ -131,6 +132,8 @@ extern "C" __global__ void initBVHParams(madrona::BVHParams *params,
         RenderableArchetype, MortonCode>();
 
     params->bvhs = (render::MeshBVH *)bvhs;
+
+    params->timingInfo = (KernelTimingInfo *)timings;
 
 #if 0
     params->bvhModels = (render::BVHModel *)mgr->getArchetypeComponent<

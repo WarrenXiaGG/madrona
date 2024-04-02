@@ -416,10 +416,12 @@ Optional<render::MeshBVH> EmbreeLoader::load(const SourceObject& object)
         nodes.push_back(node);
     }
 
-    //#define COMPRESSED
-#ifdef COMPRESSED
-    for(int i=0;i< innerID;i++){
-        NodeCompressed node;
+#ifdef MADRONA_COMPRESSED_BVH
+    float rootMaxX = FLT_MIN;
+    float rootMaxY = FLT_MIN;
+    float rootMaxZ = FLT_MIN;
+
+    if(innerID == 0) {
         float minX = FLT_MAX,
               minY = FLT_MAX,
               minZ = FLT_MAX,
@@ -427,7 +429,64 @@ Optional<render::MeshBVH> EmbreeLoader::load(const SourceObject& object)
               maxY = FLT_MIN,
               maxZ = FLT_MIN;
 
-        for(int i2=0;i2<nodeWidth;i2++){
+        for(int i2 = 0; i2 < nodeWidth; i2++) {
+            if(i2 < leafNodes.size()) {
+                LeafNode *iNode = (LeafNode *) leafNodes[i2];
+                BoundingBox box = iNode->bounds;
+                minX = fminf(minX, box.lower_x);
+                minY = fminf(minY, box.lower_y);
+                minZ = fminf(minZ, box.lower_z);
+                maxX = fmaxf(maxX, box.upper_x);
+                maxY = fmaxf(maxY, box.upper_y);
+                maxZ = fmaxf(maxZ, box.upper_z);
+            }
+        }
+
+        rootMaxX = maxX;
+        rootMaxY = maxY;
+        rootMaxZ = maxZ;
+
+        MeshBVH::Node node;
+        int8_t ex = ceilf(log2f((maxX-minX) / (powf(2, 8) - 1)));
+        int8_t ey = ceilf(log2f((maxY-minY) / (powf(2, 8) - 1)));
+        int8_t ez = ceilf(log2f((maxZ-minZ) / (powf(2, 8) - 1)));
+        
+        node.minX = minX;
+        node.minY = minY;
+        node.minZ = minZ;
+        node.expX = ex;
+        node.expY = ey;
+        node.expZ = ez;
+        for(int j = 0; j < nodeWidth; j++){
+            int32_t child;
+            if(j < leafNodes.size()) {
+                LeafNode *iNode = (LeafNode *) leafNodes[j];
+                child = 0x80000000 | iNode->lid;
+                BoundingBox box = iNode->bounds;
+                node.qMinX[j] = floorf((box.lower_x - minX) / powf(2, ex));
+                node.qMinY[j] = floorf((box.lower_y - minY) / powf(2, ey));
+                node.qMinZ[j] = floorf((box.lower_z - minZ) / powf(2, ez));
+                node.qMaxX[j] = ceilf((box.upper_x - minX) / powf(2, ex));
+                node.qMaxY[j] = ceilf((box.upper_y - minY) / powf(2, ey));
+                node.qMaxZ[j] = ceilf((box.upper_z - minZ) / powf(2, ez));
+            } else {
+                child = sentinel;
+            }
+            node.children[j] = child;
+            //node.children[j] = 0xBBBBBBBB;
+        }
+        nodes.push_back(node);
+    }
+    for(int i = 0; i < innerID; i++){
+        MeshBVH::Node node;
+        float minX = FLT_MAX,
+              minY = FLT_MAX,
+              minZ = FLT_MAX,
+              maxX = FLT_MIN,
+              maxY = FLT_MIN,
+              maxZ = FLT_MIN;
+
+        for(int i2 = 0; i2 < nodeWidth; i2++){
             if(innerNodes[i]->children[i2] != nullptr) {
                 minX = fminf(minX, innerNodes[i]->bounds[i2].lower_x);
                 minY = fminf(minY, innerNodes[i]->bounds[i2].lower_y);
@@ -437,6 +496,10 @@ Optional<render::MeshBVH> EmbreeLoader::load(const SourceObject& object)
                 maxZ = fmaxf(maxZ, innerNodes[i]->bounds[i2].upper_z);
             }
         }
+
+        rootMaxX = fmaxf(maxX,rootMaxX);
+        rootMaxY = fmaxf(maxY,rootMaxY);
+        rootMaxZ = fmaxf(maxZ,rootMaxZ);
         //printf("%f,%f,%f | %f,%f,%f\n",minX,minY,minZ,maxX,maxY,maxZ);
 
         int8_t ex = ceilf(log2f((maxX-minX)/(powf(2, 8) - 1)));
@@ -450,7 +513,7 @@ Optional<render::MeshBVH> EmbreeLoader::load(const SourceObject& object)
         node.expY = ey;
         node.expZ = ez;
         node.parentID = -1;
-        for(int i2=0;i2<nodeWidth;i2++){
+        for(int i2 = 0; i2 < nodeWidth; i2++) {
             node.qMinX[i2] = floorf((innerNodes[i]->bounds[i2].lower_x - minX) / powf(2, ex));
             node.qMinY[i2] = floorf((innerNodes[i]->bounds[i2].lower_y - minY) / powf(2, ey));
             node.qMinZ[i2] = floorf((innerNodes[i]->bounds[i2].lower_z - minZ) / powf(2, ez));
@@ -458,9 +521,9 @@ Optional<render::MeshBVH> EmbreeLoader::load(const SourceObject& object)
             node.qMaxY[i2] = ceilf((innerNodes[i]->bounds[i2].upper_y - minY) / powf(2, ey));
             node.qMaxZ[i2] = ceilf((innerNodes[i]->bounds[i2].upper_z - minZ) / powf(2, ez));
         }
-        for(int j=0;j<nodeWidth;j++){
+        for(int j = 0; j < nodeWidth; j++){
             int32_t child;
-            if(j<innerNodes[i]->numChildren) {
+            if(j < innerNodes[i]->numChildren) {
                 Node *node2 = innerNodes[i]->children[j];
                 if (!node2->isLeaf) {
                     InnerNode *iNode = (InnerNode *) node2;
@@ -469,17 +532,50 @@ Optional<render::MeshBVH> EmbreeLoader::load(const SourceObject& object)
                     LeafNode *iNode = (LeafNode *) node2;
                     child = 0x80000000 | iNode->lid;
                 }
-            }else{
+            } else {
                 child = sentinel;
             }
             node.children[j] = child;
         }
+        nodes.push_back(node);
     }
+
+    auto *root_node = &nodes[current_node_offset];
+
+    // Create root AABB
+    madrona::math::AABB merged = {
+        .pMin = { root_node->minX, root_node->minY, root_node->minZ},
+        .pMax = { rootMaxX, rootMaxY, rootMaxZ },
+    };
+
+    aabbOut = merged;
 #else
-    for(int i=0;i<innerID;i++){
+    if(innerID == 0){
+        MeshBVH::Node node;
+        for(int j = 0; j < nodeWidth; j++){
+            int32_t child;
+            if(j < leafNodes.size()) {
+                LeafNode *iNode = (LeafNode *) leafNodes[j];
+                child = 0x80000000 | iNode->lid;
+                BoundingBox box = iNode->bounds;
+                node.minX[j] = box.lower_x;
+                node.minY[j] = box.lower_y;
+                node.minZ[j] = box.lower_z;
+                node.maxX[j] = box.upper_x;
+                node.maxY[j] = box.upper_y;
+                node.maxZ[j] = box.upper_z;
+            } else {
+                child = sentinel;
+            }
+            node.children[j] = child;
+        }
+        nodes.push_back(node);
+    }
+
+    for(int i = 0; i < innerID; i++){
         render::MeshBVH::Node node;
         node.parentID = -1;
-        for(int i2=0;i2<nodeWidth;i2++){
+        for (int i2 = 0; i2 < nodeWidth; i2++){
             BoundingBox box = innerNodes[i]->bounds[i2];
             node.minX[i2] = box.lower_x;
             node.minY[i2] = box.lower_y;
@@ -488,9 +584,9 @@ Optional<render::MeshBVH> EmbreeLoader::load(const SourceObject& object)
             node.maxY[i2] = box.upper_y;
             node.maxZ[i2] = box.upper_z;
         }
-        for(int j=0;j<nodeWidth;j++){
+        for(int j = 0; j < nodeWidth; j++){
             int32_t child;
-            if(j<innerNodes[i]->numChildren) {
+            if(j < innerNodes[i]->numChildren) {
                 Node *node2 = innerNodes[i]->children[j];
                 if (!node2->isLeaf) {
                     InnerNode *iNode = (InnerNode *) node2;

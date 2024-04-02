@@ -51,6 +51,17 @@ struct LBVHNode {
             return idx - 1;
         }
     }
+
+    inline uint32_t numChildren()
+    {
+        return (uint32_t)(left != 0) + (uint32_t)(right != 0);
+    }
+
+    // TODO: IMPLEMENT SAH RIGHT NAOW!!!
+    static inline float sah()
+    {
+        return 0.f;
+    }
 };
 
 // These have to be in global memory
@@ -78,6 +89,15 @@ struct BVHInternalData {
     AtomicU32 constructAABBsAccumulator;
 
     uint32_t numFrames;
+
+    AtomicU32 treeletRootIndexCounter;
+    uint32_t *treeletRootIndices;
+};
+
+struct KernelTimingInfo {
+    AtomicU32 timingCounts;
+    AtomicU64 tlasTime;
+    AtomicU64 blasTime;
 };
 
 struct BVHParams {
@@ -100,6 +120,8 @@ struct BVHParams {
     // These are all going to be inherited from the ECS
     void *hostAllocator;
     void *tmpAllocator;
+
+    KernelTimingInfo *timingInfo;
 };
 
 }

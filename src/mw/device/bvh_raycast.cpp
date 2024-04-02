@@ -3,6 +3,8 @@
 #include <madrona/bvh.hpp>
 #include <madrona/mesh_bvh.hpp>
 
+// #define MADRONA_PROFILE_BVH_KERNEL
+
 using namespace madrona;
 
 namespace sm {
@@ -14,7 +16,51 @@ extern __shared__ uint8_t buffer[];
 
 extern "C" __constant__ BVHParams bvhParams;
 
-//BVHParams bvhParams;
+enum class ProfilerState {
+    TLAS,
+    BLAS,
+    None
+};
+
+// For tracing purposes.
+uint64_t globalTimer()
+{
+    uint64_t timestamp;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(timestamp));
+    return timestamp;
+}
+
+struct Profiler {
+    uint64_t mark;
+    uint64_t timeInTLAS;
+    uint64_t timeInBLAS;
+
+    ProfilerState state;
+
+    void markState(ProfilerState profiler_state)
+    {
+#ifdef MADRONA_PROFILE_BVH_KERNEL
+        if (profiler_state == state) {
+            return;
+        } else {
+            if (state == ProfilerState::None) {
+                mark = globalTimer();
+                state = profiler_state;
+            } else if (state == ProfilerState::TLAS) {
+                uint64_t new_mark = globalTimer();
+                timeInTLAS += (new_mark - mark);
+                mark = new_mark;
+                state = profiler_state;
+            } else if (state == ProfilerState::BLAS) {
+                uint64_t new_mark = globalTimer();
+                timeInBLAS += (new_mark - mark);
+                mark = new_mark;
+                state = profiler_state;
+            }
+        }
+#endif
+    }
+};
 
 // Trace a ray through the top level structure.
 static __device__ bool traceRayTLAS(uint32_t world_idx,
@@ -24,7 +70,8 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                                     math::Vector3 ray_d,
                                     float *out_hit_t,
                                     math::Vector3 *out_hit_normal,
-                                    float t_max)
+                                    float t_max,
+                                    Profiler *profiler)
 {
 #define INSPECT(...) if (pixel_x == 32 && pixel_y == 32) { printf(__VA_ARGS__); }
     static constexpr float epsilon = 0.00001f;
@@ -63,6 +110,8 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
     Vector3 closest_hit_normal = {};
 
     while (stack.size > 0) {
+        profiler->markState(ProfilerState::TLAS);
+
         // Can be negative if this is a leaf node
         int32_t node_store_idx = stack.pop();
 
@@ -139,8 +188,10 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     txfm_ray_d /= t_scale;
 
                     
+                    profiler->markState(ProfilerState::BLAS);
                     bool leaf_hit = model_bvh->traceRay(txfm_ray_o, txfm_ray_d, &hit_t,
                             &leaf_hit_normal, &stack, txfm, t_max);
+                    profiler->markState(ProfilerState::TLAS);
 
                     if (leaf_hit) {
 
@@ -162,6 +213,8 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
         }
     }
 
+    profiler->markState(ProfilerState::None);
+
     *out_hit_normal = closest_hit_normal;
 
     return ray_hit;
@@ -169,6 +222,13 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
 extern "C" __global__ void bvhRaycastEntry()
 {
+    Profiler profiler = {
+        .mark = 0,
+        .timeInTLAS = 0,
+        .timeInBLAS = 0,
+        .state = ProfilerState::None
+    };
+
     const uint32_t num_worlds = bvhParams.numWorlds;
     const uint32_t total_num_views = bvhParams.viewOffsets[num_worlds-1] +
                                      bvhParams.viewCounts[num_worlds-1];
@@ -184,6 +244,8 @@ extern "C" __global__ void bvhRaycastEntry()
 
     uint32_t bytes_per_view =
         bvhParams.renderOutputResolution * bvhParams.renderOutputResolution * 3;
+
+    uint32_t num_processed_pixels = 0;
 
     while (current_view_offset < total_num_views) {
         // While we still have views to generate, trace.
@@ -233,7 +295,7 @@ extern "C" __global__ void bvhRaycastEntry()
                 world_idx, current_view_offset, 
                 pixel_x, pixel_y,
                 ray_start, ray_dir, 
-                &t, &normal, 10000.f);
+                &t, &normal, 10000.f, &profiler);
 
         uint32_t linear_pixel_idx = 3 * 
             (pixel_y + pixel_x * bvhParams.renderOutputResolution);
@@ -254,6 +316,14 @@ extern "C" __global__ void bvhRaycastEntry()
 
         current_view_offset += num_resident_views;
 
+        num_processed_pixels++;
+
         __syncthreads();
     }
+
+#ifdef MADRONA_PROFILE_BVH_KERNEL
+    bvhParams.timingInfo->timingCounts.fetch_add_relaxed(num_processed_pixels);
+    bvhParams.timingInfo->tlasTime.fetch_add_relaxed(profiler.timeInTLAS);
+    bvhParams.timingInfo->blasTime.fetch_add_relaxed(profiler.timeInBLAS);
+#endif
 }

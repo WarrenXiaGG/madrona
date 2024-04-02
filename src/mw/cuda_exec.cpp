@@ -328,6 +328,8 @@ struct BVHKernels {
     CUevent stopEvent;
 
     std::vector<TimingData> recordedTimings;
+
+    mwGPU::madrona::KernelTimingInfo *timingInfo;
 };
 
 struct GPUKernels {
@@ -1121,6 +1123,9 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
     cuEventCreate(&start_trace_record, CU_EVENT_DEFAULT);
     cuEventCreate(&end_record, CU_EVENT_DEFAULT);
 
+    auto *timing_info = (mwGPU::madrona::KernelTimingInfo *)
+        cu::allocReadback(sizeof(mwGPU::madrona::KernelTimingInfo));
+
     BVHKernels bvh_kernels = {
         .numSMs = (uint32_t)num_sms,
         .mod = mod,
@@ -1133,7 +1138,8 @@ static BVHKernels buildBVHKernels(const CompileConfig &cfg,
         .constructAABBs = bvh_aabbs,
         .startBuildEvent = start_build_record,
         .startTraceEvent = start_trace_record,
-        .stopEvent = end_record
+        .stopEvent = end_record,
+        .timingInfo = timing_info
     };
 
     return bvh_kernels;
@@ -1713,7 +1719,8 @@ static GPUEngineState initEngineAndUserState(
                                                  num_worlds,
                                                  bvh_internals,
                                                  bvhs_ptr,
-                                                 num_bvhs);
+                                                 num_bvhs,
+                                                 bvh_kernels.timingInfo);
 
         // Launch the kernel in the megakernel module to initialize the BVH 
         // params
@@ -2301,6 +2308,23 @@ void MWCudaExecutor::run()
             build_time_ms / total_time,
             trace_time_ms / total_time
         });
+
+        uint64_t time_in_tlas_u64 = 
+            impl_->bvhKernels.timingInfo->tlasTime.load_relaxed();
+        uint64_t time_in_blas_u64 = 
+            impl_->bvhKernels.timingInfo->blasTime.load_relaxed();
+        uint64_t num_processed_pixels =
+            impl_->bvhKernels.timingInfo->timingCounts.load_relaxed();
+
+        double time_in_tlas_f64 = (double)time_in_tlas_u64 / 1000000000.f;
+        double time_in_blas_f64 = (double)time_in_blas_u64 / 1000000000.f;
+        time_in_tlas_f64 /= (double)num_processed_pixels;
+        time_in_blas_f64 /= (double)num_processed_pixels;
+
+        printf("Time in TLAS: %lf; Time in BLAS: %lf\n",
+                time_in_tlas_f64, time_in_blas_f64);
+        printf("Time in TLAS: %llu; Time in BLAS: %llu\n",
+                time_in_tlas_u64, time_in_blas_u64);
 
 #if 0
         printf("ray casting kernels took %f (%f build vs %f trace) ms\n",
