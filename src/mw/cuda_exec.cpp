@@ -35,6 +35,7 @@ using namespace madrona;
 #include "device/include/madrona/mw_gpu/tracing.hpp"
 #include "device/include/madrona/bvh.hpp"
 
+
 namespace madrona::mwGPU {
 
 class HostPrintCPU {
