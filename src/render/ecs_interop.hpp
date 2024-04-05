@@ -8,6 +8,7 @@ struct RenderECSBridge {
     // Allocated from Vulkan, to be imported into Cuda
     PerspectiveCameraData *views;
     InstanceData *instances;
+    TLBVHNode *aabbs;
 
     int32_t *instanceOffsets;
     int32_t *viewOffsets;
