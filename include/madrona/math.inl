@@ -1433,6 +1433,29 @@ float AABB::surfaceArea() const
     return 2.f * (d.x * d.y + d.x * d.z + d.y * d.z);
 }
 
+inline Vector3 AABB::centroid() const
+{
+    return 0.5f * (pMin + pMax);
+}
+
+inline int AABB::maxDimension() const
+{
+    Vector3 d = pMax - pMin;
+
+    if (d.x > d.y && d.x > d.z) return 0;
+    else if (d.y > d.z)         return 1;
+    else                        return 2;
+}
+
+inline Vector3 AABB::offset(const Vector3 &p) const
+{
+    Vector3 o = p - pMin;
+    if (pMax.x > pMin.x) o.x /= pMax.x - pMin.x;
+    if (pMax.y > pMin.y) o.y /= pMax.y - pMin.y;
+    if (pMax.z > pMin.z) o.z /= pMax.z - pMin.z;
+    return o;
+}
+
 bool AABB::overlaps(const AABB &o) const
 {
     auto [a_min, a_max] = *this;

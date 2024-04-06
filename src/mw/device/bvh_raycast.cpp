@@ -2,8 +2,11 @@
 
 #include <madrona/bvh.hpp>
 #include <madrona/mesh_bvh.hpp>
+#include <madrona/mw_gpu/host_print.hpp>
 
 // #define MADRONA_PROFILE_BVH_KERNEL
+
+#define LOG(...) mwGPU::HostPrint::log(__VA_ARGS__)
 
 using namespace madrona;
 
@@ -73,7 +76,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                                     float t_max,
                                     Profiler *profiler)
 {
-#define INSPECT(...) if (pixel_x == 32 && pixel_y == 32) { printf(__VA_ARGS__); }
+#define INSPECT(...) if (view_idx == 0 && pixel_x == 32 && pixel_y == 32) { LOG(__VA_ARGS__); }
     static constexpr float epsilon = 0.00001f;
 
     if (ray_d.x == 0.f) {
@@ -142,25 +145,40 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
             math::AABB child_aabb = child_node->aabb;
 
+            if (child_is_leaf) {
+                INSPECT("({} of parent {}) Trace through leaf {} with AABB {} {} {} -> {} {} {}\n", 
+                        i, node_idx, child_node_idx,
+                        child_aabb.pMin.x, child_aabb.pMin.y, child_aabb.pMin.z,
+                        child_aabb.pMax.x, child_aabb.pMax.y, child_aabb.pMax.z);
+            } else {
+                INSPECT("({} of parent {}) Trace through internal node {} with AABB {} {} {} -> {} {} {}\n", 
+                        i, node_idx, child_node_idx,
+                        child_aabb.pMin.x, child_aabb.pMin.y, child_aabb.pMin.z,
+                        child_aabb.pMax.x, child_aabb.pMax.y, child_aabb.pMax.z);
+            }
+
             float aabb_hit_t, aabb_far_t;
             Diag3x3 inv_ray_d = { 1.f/ray_d.x, 1.f/ray_d.y, 1.f/ray_d.z };
             bool intersect_aabb = child_aabb.rayIntersects(ray_o, inv_ray_d,
                     4.0f, t_max, aabb_hit_t, aabb_far_t);
 
             if (aabb_hit_t <= t_max) {
+                INSPECT("HIT with the TLAS\n");
+
                 // If the near T of the box intersection happens before the closest
                 // intersection we got thus far, try tracing through.
 
                 if (child_is_leaf) {
+                    uint32_t instance_idx = child_node->instanceIdx;
 
                     // Child node idx is the index of the mesh bvh
                     // LBVHNode *leaf_node = &leaves[child_node_idx];
 
                     // render::BVHModel *model = &bvh_models[child_node_idx];
                     render::MeshBVH *model_bvh = bvhParams.bvhs +
-                        instances[child_node_idx].objectID;
+                        instances[instance_idx].objectID;
 
-                    render::InstanceData *instance_data = &instances[child_node_idx];
+                    render::InstanceData *instance_data = &instances[instance_idx];
 
                     // Now we trace through this model.
                     float hit_t;
@@ -194,6 +212,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     profiler->markState(ProfilerState::TLAS);
 
                     if (leaf_hit) {
+                        INSPECT("HIT with the BLAS!!!\n");
 
                         ray_hit = true;
                         t_max = hit_t * t_scale;

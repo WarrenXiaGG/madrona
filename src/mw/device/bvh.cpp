@@ -12,10 +12,102 @@
 #include <madrona/math.hpp>
 #include <madrona/memory.hpp>
 #include <madrona/mesh_bvh.hpp>
+#include <madrona/mw_gpu/host_print.hpp>
+
+#define LOG(...) mwGPU::HostPrint::log(__VA_ARGS__)
 
 using namespace madrona;
 
+static constexpr uint32_t kNumBuckets = 12;
+
+struct BinnedSAHJob {
+    enum class Direction {
+        None, Left, Right
+    };
+
+    // Start index of the instances for the current job.
+    uint32_t start;
+
+    // End index of the instances for the current job.
+    uint32_t end;
+
+    // Parent index
+    uint32_t parent;
+
+    // Is this job for the left or right child of the parent.
+    Direction currentDir;
+};
+
+struct SAHBucket {
+    uint32_t count;
+    math::AABB bounds;
+};
+
 namespace sm {
+
+// We cannot do a true lock-free stack because the items of the stack are
+// stored in a contiguous array.
+template <typename T, int MaxN>
+struct Stack {
+    void init()
+    {
+        lock_.store(0, std::memory_order_relaxed);
+        offset = 0;
+    }
+
+    void push(T item)
+    {
+        while (lock_.exchange(1, std::memory_order_acquire) == 1) {
+            while (lock_.load(std::memory_order_relaxed) == 1);
+        }
+
+        assert(offset < MaxN);
+
+        items[offset++] = item;
+
+        lock_.store(0, std::memory_order_release);
+    }
+
+    T pop()
+    {
+        while (lock_.exchange(1, std::memory_order_acquire) == 1) {
+            while (lock_.load(std::memory_order_relaxed) == 1);
+        }
+
+        T item = {};
+
+        if (offset > 0) {
+            item = items[--offset];
+        }
+
+        lock_.store(0, std::memory_order_release);
+
+        return item;
+    }
+
+    [[maybe_unused]] bool tryPop(T *item)
+    {
+        int32_t is_locked = lock_.load(std::memory_order_relaxed);
+        if (is_locked == 1) return false;
+
+        int32_t prev_locked = lock_.exchange(1, std::memory_order_relaxed);
+        if (prev_locked) return false;
+
+        if (offset > 0) {
+            *item = items[--offset];
+        }
+
+        lock_.store(0, std::memory_order_release);
+
+        return true;
+    }
+
+private:
+    cuda::atomic<int32_t, cuda::thread_scope_block> lock_;
+    uint32_t offset;
+    T items[MaxN];
+};
+
 extern __shared__ uint8_t buffer[];
 
 // For the initial BVH build.
@@ -28,6 +120,35 @@ struct BuildFastBuffer {
     uint32_t mortonCodesEnd;
 
     char buffer[1];
+};
+
+struct BuildSlowBuffer {
+    uint32_t worldIdx;
+    uint32_t instancesOffset;
+    uint32_t numInstances;
+    LBVHNode *internalNodesPtr;
+    LBVHNode *leafNodesPtr;
+    render::InstanceData *instances;
+    render::TLBVHNode *aabbs;
+    // We use these indirect indices to refer to instances.
+    uint32_t *indirectIndices;
+    uint32_t *originalIndicesPtr;
+
+    // For each world, we keep looping for work until numJobs hits 0
+    cuda::atomic<int32_t, cuda::thread_scope_block> numJobs;
+    cuda::atomic<int32_t, cuda::thread_scope_block> leafCounter;
+    cuda::atomic<int32_t, cuda::thread_scope_block> internalNodeCounter;
+    cuda::atomic<int32_t, cuda::thread_scope_block> processedJobsCounter;
+
+    Stack<BinnedSAHJob, 32> stack;
+
+    char buffer[1];
+
+
+
+    math::AABB getAABB(uint32_t idx) {
+        return aabbs[indirectIndices[idx]].aabb;
+    }
 };
 
 struct ConstructAABBBuffer {
@@ -87,8 +208,8 @@ extern "C" __global__ void bvhInit()
 // 2) Optimize the BVH
 extern "C" __global__ void bvhAllocInternalNodes()
 {
-    printf("render resolution %d\n", bvhParams.renderOutputResolution);
-    printf("pixels are at %p\n", bvhParams.renderOutput);
+    LOG("\n\n\n\nrender resolution {}\n", bvhParams.renderOutputResolution);
+    LOG("pixels are at {}\n", bvhParams.renderOutput);
 
     bvhParams.timingInfo->timingCounts.store_relaxed(0);
     bvhParams.timingInfo->tlasTime.store_relaxed(0);
@@ -105,7 +226,7 @@ extern "C" __global__ void bvhAllocInternalNodes()
     uint32_t num_required_nodes = num_instances;
     uint32_t num_bytes = num_required_nodes * 
         (2 * sizeof(LBVHNode) + sizeof(TreeletFormationNode) +
-         sizeof(uint32_t));
+         sizeof(uint32_t) + sizeof(uint32_t));
 
     mwGPU::TmpAllocator *allocator = (mwGPU::TmpAllocator *)
         bvhParams.tmpAllocator;
@@ -115,6 +236,7 @@ extern "C" __global__ void bvhAllocInternalNodes()
     internal_data->internalNodes = (LBVHNode *)ptr;
     internal_data->numAllocatedNodes = num_required_nodes;
     internal_data->buildFastAccumulator.store_relaxed(0);
+    internal_data->buildSlowAccumulator.store_relaxed(0);
     internal_data->constructAABBsAccumulator.store_relaxed(0);
 
     internal_data->leaves = (LBVHNode *)((char *)ptr +
@@ -125,9 +247,16 @@ extern "C" __global__ void bvhAllocInternalNodes()
     internal_data->treeletFormNodes = (TreeletFormationNode *)
         ((char *)ptr + 2 * num_required_nodes * sizeof(LBVHNode));
 
-    internal_data->treeletRootIndices = (uint32_t *)
+    internal_data->indirectIndices = (uint32_t *)
         ((char *)ptr + 2 * num_required_nodes * sizeof(LBVHNode)
                      + num_required_nodes * sizeof(TreeletFormationNode));
+
+#if 0
+    internal_data->indirectIndices = (uint32_t *)
+        ((char *)ptr + 2 * num_required_nodes * sizeof(LBVHNode)
+                     + num_required_nodes * sizeof(TreeletFormationNode)
+                     + num_required_nodes * sizeof(uint32_t));
+#endif
 
     internal_data->treeletRootIndexCounter.store_relaxed(0);
 
@@ -151,6 +280,481 @@ int32_t ceil_div(int32_t a, int32_t b)
 {
     return (a + b-1) / b;
 }
+}
+
+inline __device__ BinnedSAHJob getBinnedSAHJob(sm::BuildSlowBuffer *smem)
+{
+    BinnedSAHJob current_job = { 0, 0 };
+    smem->stack.tryPop(&current_job);
+    return current_job;
+}
+
+inline __device__ math::AABB getBounds(bool &is_leaf,
+                                       sm::BuildSlowBuffer *smem,
+                                       const BinnedSAHJob &job,
+                                       uint32_t num_instances)
+{
+    // Only the first thread calculates the bounds
+    math::AABB bounds = math::AABB::invalid();
+    is_leaf = false;
+
+    bounds = smem->getAABB(job.start);
+
+    for (int i = job.start + 1; i < job.end; ++i) {
+        math::AABB current_aabb = smem->getAABB(i);
+        bounds = math::AABB::merge(bounds, current_aabb);
+    }
+
+    if (num_instances == 1) {
+        is_leaf = true;
+    }
+
+
+    return bounds;
+}
+
+inline __device__ void updateParent(sm::BuildSlowBuffer *smem,
+                                    const BinnedSAHJob &current_job,
+                                    bool is_leaf,
+                                    int32_t current_node_idx)
+{
+    if (current_job.parent == 0xFFFF'FFFF) {
+        return;
+    }
+
+    LBVHNode *parent_node = smem->internalNodesPtr + current_job.parent;
+    
+    switch (current_job.currentDir) {
+
+    case BinnedSAHJob::Direction::Left: {
+        parent_node->left = LBVHNode::childIdxToStoreIdx(
+                current_node_idx, is_leaf);
+    } break;
+
+    case BinnedSAHJob::Direction::Right: {
+        parent_node->right = LBVHNode::childIdxToStoreIdx(
+                current_node_idx, is_leaf);
+    } break;
+
+    case BinnedSAHJob::Direction::None: {
+        // This should never ever happen.
+        assert(false);
+    } break;
+
+    }
+}
+
+inline __device__ void pushLeaf(sm::BuildSlowBuffer *smem,
+                                const BinnedSAHJob &current_job,
+                                const math::AABB &bounds)
+{
+    int32_t current_leaf_idx = (int32_t)smem->leafCounter.fetch_add(1,
+            std::memory_order_relaxed);
+
+    LBVHNode *leaf_node = smem->leafNodesPtr + current_leaf_idx;
+
+    leaf_node->left = leaf_node->right = 0;
+
+    // Just get only instance index in this span of instances
+    leaf_node->instanceIdx = 
+        smem->indirectIndices[current_job.start];
+
+    leaf_node->parent = current_job.parent;
+    leaf_node->aabb = bounds;
+
+    updateParent(smem, current_job, true, current_leaf_idx);
+}
+
+inline __device__ math::AABB getCentroidBounds(sm::BuildSlowBuffer *smem,
+                                               const BinnedSAHJob &job)
+{
+    math::AABB centroid_bounds = math::AABB::invalid();
+
+    centroid_bounds = math::AABB::point(
+            smem->getAABB(job.start).centroid());
+
+    for (int i = job.start + 1; i < job.end; ++i) {
+        math::Vector3 current_centroid = smem->getAABB(i).centroid();
+        centroid_bounds.expand(current_centroid);
+    }
+
+    return centroid_bounds;
+}
+
+inline __device__ uint32_t pushInternalNode(sm::BuildSlowBuffer *smem,
+                                            const BinnedSAHJob &current_job,
+                                            const math::AABB &bounds)
+{
+    int32_t current_node_idx = (int32_t)
+        smem->internalNodeCounter.fetch_add(1, std::memory_order_relaxed);
+
+    LBVHNode *node = smem->internalNodesPtr + current_node_idx;
+
+    // For now, just initialize to 0 (this will be updated by later recursive
+    // calls.
+    node->left = node->right = 0;
+    node->instanceIdx = 0xFFFF'FFFF;
+    node->parent = current_job.parent;
+    node->aabb = bounds;
+    
+    updateParent(smem, current_job, false, current_node_idx);
+
+    return (uint32_t)current_node_idx;
+}
+
+inline __device__ void updateJobCount(sm::BuildSlowBuffer *smem,
+                                      int32_t job_count_diff)
+{
+    int32_t new_job_count = 
+        smem->numJobs.fetch_add(job_count_diff, std::memory_order_relaxed);
+}
+
+inline __device__ int32_t pushJobs(sm::BuildSlowBuffer *smem,
+                                   const BinnedSAHJob &current_job,
+                                   uint32_t mid,
+                                   uint32_t current_node_idx)
+{
+    int32_t job_count_diff = -1;
+
+    // Push the left job if there is one to push
+    if (mid - current_job.start > 0) {
+        BinnedSAHJob job = {
+            .start = current_job.start,
+            .end = mid,
+            .parent = current_node_idx,
+            .currentDir = BinnedSAHJob::Direction::Left,
+        };
+
+        smem->stack.push(job);
+
+        ++job_count_diff;
+    }
+
+    // Push the right job if there is one to push
+    if (current_job.end - mid > 0) {
+        BinnedSAHJob job = {
+            .start = mid,
+            .end = current_job.end,
+            .parent = current_node_idx,
+            .currentDir = BinnedSAHJob::Direction::Right,
+        };
+
+        smem->stack.push(job);
+
+        ++job_count_diff;
+    }
+
+    return job_count_diff;
+}
+
+inline __device__ int getBucket(sm::BuildSlowBuffer *smem,
+                                uint32_t prim_idx,
+                                const math::AABB &centroid_bounds,
+                                int max_dim)
+{
+    math::AABB aabb = smem->getAABB(prim_idx);
+    int b = kNumBuckets * centroid_bounds.offset(aabb.centroid())[max_dim];
+
+    if (b >= kNumBuckets) {
+        b = kNumBuckets - 1;
+    }
+
+    return b;
+}
+
+inline __device__ uint32_t partitionIndices(
+        uint32_t start, uint32_t end,
+        SAHBucket *buckets,
+        sm::BuildSlowBuffer *smem,
+        uint32_t min_cost_split_bucket,
+        const math::AABB &centroid_bounds,
+        int max_dim)
+{
+    uint32_t first_idx = [&]() {
+        for (uint32_t i = start; i < end; ++i) {
+            if (getBucket(smem, i, centroid_bounds, max_dim) >
+                min_cost_split_bucket) {
+                return i;
+            }
+        }
+
+        return end;
+    }();
+
+    // Every thing is before the split
+    if (first_idx == end) {
+        return first_idx;
+    }
+
+    for (int i = first_idx + 1; i < end; ++i) {
+        if (getBucket(smem, i, centroid_bounds, max_dim) <=
+                min_cost_split_bucket) {
+            std::swap(smem->indirectIndices[first_idx],
+                      smem->indirectIndices[i]);
+            ++first_idx;
+        }
+    }
+
+    return first_idx;
+}
+
+// This builds a high quality tree but slowly
+extern "C" __global__ void bvhBuildSlow()
+{
+    BVHInternalData *internal_data = bvhParams.internalData;
+    sm::BuildSlowBuffer *smem = (sm::BuildSlowBuffer *)sm::buffer;
+
+    uint32_t current_world_idx = blockIdx.x;
+    uint32_t lane_idx = threadIdx.x % MADRONA_WARP_SIZE;
+    uint32_t warp_idx = threadIdx.x / MADRONA_WARP_SIZE;
+
+    while (current_world_idx < bvhParams.numWorlds) {
+        // Get the instance offsets and stuff.
+        __syncthreads();
+
+        if (threadIdx.x == 0) {
+            smem->worldIdx = current_world_idx;
+            smem->instancesOffset = bvhParams.instanceOffsets[current_world_idx];
+            smem->numInstances = bvhParams.instanceCounts[current_world_idx];
+            smem->internalNodesPtr = internal_data->internalNodes +
+                                     smem->instancesOffset;
+            smem->leafNodesPtr = internal_data->leaves +
+                                 smem->instancesOffset;
+            smem->instances = bvhParams.instances + smem->instancesOffset;
+            smem->aabbs = bvhParams.aabbs + smem->instancesOffset;
+            smem->stack.init();
+            smem->stack.push({ 0, smem->numInstances, 0xFFFF'FFFF, 
+                               BinnedSAHJob::Direction::None });
+            smem->numJobs.store(1, std::memory_order_relaxed);
+            smem->indirectIndices = internal_data->indirectIndices + 
+                smem->instancesOffset;
+            smem->originalIndicesPtr = smem->indirectIndices;
+            smem->processedJobsCounter.store(0, std::memory_order_relaxed);
+            smem->leafCounter.store(0, std::memory_order_relaxed);
+            smem->internalNodeCounter.store(0, std::memory_order_relaxed);
+            smem->processedJobsCounter.store(0, std::memory_order_relaxed);
+        }
+
+        __syncthreads();
+
+        // Set the indirect indices to just a simple iota
+        for (int i = threadIdx.x; i < smem->numInstances; i += blockDim.x) {
+            smem->indirectIndices[i] = i;
+        }
+
+        __syncthreads();
+
+        if (lane_idx == 0) {
+            while (smem->numJobs.load(std::memory_order_relaxed) > 0) {
+                // Try to pop a job from the stack.
+                BinnedSAHJob current_job = getBinnedSAHJob(smem);
+
+                // If the range of the instances for this job is 0, that means
+                // that we didn't manage to get a job.
+                uint32_t num_instances = current_job.end - current_job.start;
+                if (num_instances == 0) {
+                    // For whatever reason, we didn't get a job (either lock failed,
+                    // or there weren't any jobs in the stack).
+                    continue;
+                }
+
+                int32_t processed_jobs_count = 
+                    smem->processedJobsCounter.fetch_add(
+                            1, std::memory_order_relaxed);
+
+                // Only the first thread calculates the bounds (of the AABBs)
+                bool is_leaf = false;
+                math::AABB bounds = getBounds(is_leaf, smem, 
+                        current_job, num_instances);
+
+#if 0
+                LOG("({} -> {}) {} {} {} -> {} {} {}\n",
+                        current_job.start, current_job.end,
+                        bounds.pMin.x, bounds.pMin.y, bounds.pMin.z,
+                        bounds.pMax.x, bounds.pMax.y, bounds.pMax.z);
+#endif
+
+                // If we are a leaf, push leaf and just continue.
+                if (is_leaf) {
+                    // Push this as a leaf.
+                    pushLeaf(smem, current_job, bounds);
+
+                    // No jobs were pushed, this is just removing a job
+                    updateJobCount(smem, -1);
+
+                    continue;
+                } 
+
+                // If we hit this point, we aren't at a leaf.
+                math::AABB centroid_bounds = getCentroidBounds(smem, current_job);
+
+                int max_dim = centroid_bounds.maxDimension();
+
+#if 0
+                LOG("Max dimension {}\n", max_dim);
+#endif
+
+                // The case where num_instances is 1 is already handled
+                if (num_instances == 2) {
+                    int mid = current_job.start + 1;
+                    if (smem->getAABB(current_job.start).centroid()[max_dim] >
+                            smem->getAABB(current_job.start+1).centroid()[max_dim]) {
+                        std::swap(smem->indirectIndices[current_job.start],
+                                smem->indirectIndices[current_job.start+1]);
+                    }
+
+                    // Push the new internal node
+                    uint32_t current_node_idx = pushInternalNode(
+                            smem, current_job, bounds);
+
+                    int32_t job_count_diff = pushJobs(
+                            smem, current_job, mid, current_node_idx);
+
+                    updateJobCount(smem, job_count_diff);
+
+                    continue;
+                }
+
+                // Now, handle the case where there are more than 2 instances.
+                // i.e., do the binned SAH method.
+                // Each thread in the warp has a bucket
+                {
+                    SAHBucket buckets[kNumBuckets];
+
+                    // Initialize the buckets
+                    for (uint32_t i = 0; i < kNumBuckets; ++i) {
+                        buckets[i].count = 0;
+                        buckets[i].bounds = math::AABB::invalid();
+                    }
+
+                    // Create the bounds
+                    for (uint32_t prim_idx = current_job.start;
+                            prim_idx < current_job.end;
+                            prim_idx++) {
+                        math::AABB aabb = smem->getAABB(prim_idx);
+                        int b = kNumBuckets * centroid_bounds.offset(
+                                aabb.centroid())[max_dim];
+
+                        if (b >= kNumBuckets) {
+                            b = kNumBuckets - 1;
+                        }
+
+                        buckets[b].count++;
+                        buckets[b].bounds = math::AABB::merge(buckets[b].bounds, 
+                                aabb);
+                    }
+
+                    static constexpr uint32_t kNumSplits = kNumBuckets-1;
+                    float costs[kNumSplits] = {};
+
+                    int count_below = 0;
+                    math::AABB bound_below = math::AABB::invalid();
+
+                    for (int i = 0; i < kNumSplits; ++i) {
+                        bound_below = math::AABB::merge(bound_below, buckets[i].bounds);
+                        count_below += buckets[i].count;
+                        costs[i] += count_below * bound_below.surfaceArea();
+                    }
+
+                    int count_above = 0;
+                    math::AABB bound_above = math::AABB::invalid();
+
+                    for (int i = kNumSplits; i >= 1; --i) {
+                        bound_above = math::AABB::merge(bound_above, buckets[i].bounds);
+                        count_above += buckets[i].count;
+                        costs[i - 1] += count_above * bound_above.surfaceArea();
+                    }
+
+                    int min_cost_split_bucket = -1;
+                    float min_cost = FLT_MAX;
+
+                    for (int i = 0; i < kNumSplits; ++i) {
+                        if (costs[i] < min_cost) {
+                            min_cost = costs[i];
+                            min_cost_split_bucket = i;
+                        }
+                    }
+
+                    float leaf_cost = num_instances;
+                    min_cost = 1.f / 2.f + min_cost / bounds.surfaceArea();
+                    uint32_t mid_idx = 0;
+
+                    { // Partition the array in-place
+                        mid_idx = partitionIndices(
+                                current_job.start, current_job.end,
+                                buckets,
+                                smem,
+                                min_cost_split_bucket,
+                                centroid_bounds,
+                                max_dim);
+
+                        for (int i = current_job.start; i < mid_idx; ++i) {
+                            assert(getBucket(smem, i, centroid_bounds, max_dim) <= 
+                                    min_cost_split_bucket);
+                        }
+
+                        LOG("Partition: {} -> {}; {} -> {}\n",
+                                current_job.start, mid_idx,
+                                mid_idx, current_job.end);
+                    }
+
+                    uint32_t current_node_idx = pushInternalNode(
+                            smem, current_job, bounds);
+
+                    int32_t job_count_diff = pushJobs(
+                            smem, current_job, mid_idx, current_node_idx);
+
+                    updateJobCount(smem, job_count_diff);
+                }
+
+                __syncwarp();
+            }
+
+#if 1
+            if (threadIdx.x == 0) {
+                // Print everything
+                uint32_t num_internal_nodes =
+                    smem->internalNodeCounter.load(std::memory_order_relaxed);
+                uint32_t num_leaf_nodes =
+                    smem->leafCounter.load(std::memory_order_relaxed);
+
+                for (int i = 0; i < num_internal_nodes; ++i) {
+                    LBVHNode *node = &smem->internalNodesPtr[i];
+
+                    bool left_is_leaf = false;
+                    int32_t left_idx = LBVHNode::storeIdxToChildIdx(node->left, left_is_leaf);
+
+                    bool right_is_leaf = false;
+                    int32_t right_idx = LBVHNode::storeIdxToChildIdx(node->right, right_is_leaf);
+
+                    LOG("Internal node {}: left = {} ({}); right = {} ({}); instanceIdx = {}; parent = {}; aabb = {} {} {} -> {} {} {}\n",
+                        i, 
+                        left_idx, left_is_leaf ? 1 : 2, 
+                        right_idx, right_is_leaf ? 1 : 2,
+                        node->instanceIdx,
+                        node->parent,
+                        node->aabb.pMin.x, node->aabb.pMin.y, node->aabb.pMin.z,
+                        node->aabb.pMax.x, node->aabb.pMax.y, node->aabb.pMax.z);
+                }
+
+                for (int i = 0; i < num_leaf_nodes; ++i) {
+                    LBVHNode *node = &smem->leafNodesPtr[i];
+                    LOG("Leaf node {}: left = {}; right = {}; instanceIdx = {}; parent = {}; aabb = {} {} {} -> {} {} {}\n",
+                        i, node->left, node->right, node->instanceIdx,
+                        node->parent,
+                        node->aabb.pMin.x, node->aabb.pMin.y, node->aabb.pMin.z,
+                        node->aabb.pMax.x, node->aabb.pMax.y, node->aabb.pMax.z);
+                }
+            }
+#endif
+        }
+
+        __syncwarp();
+
+
+        // Increment the world that this thread block is working on
+        current_world_idx += gridDim.x;
+    }
 }
 
 // We are going to have each thread be responsible for a single internal node

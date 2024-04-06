@@ -85,13 +85,16 @@ struct BVHInternalData {
     uint32_t numAllocatedLeaves;
 
     AtomicU32 buildFastAccumulator;
+    AtomicU32 buildSlowAccumulator;
     AtomicU32 optFastAccumulator;
     AtomicU32 constructAABBsAccumulator;
 
     uint32_t numFrames;
 
     AtomicU32 treeletRootIndexCounter;
-    uint32_t *treeletRootIndices;
+
+    // NOTE: may use this for treelet optimization later
+    uint32_t *indirectIndices;
 };
 
 struct KernelTimingInfo {
@@ -120,6 +123,7 @@ struct BVHParams {
     // These are all going to be inherited from the ECS
     void *hostAllocator;
     void *tmpAllocator;
+    void *hostPrintAddr;
 
     KernelTimingInfo *timingInfo;
 };
