@@ -140,7 +140,7 @@ struct BuildSlowBuffer {
     cuda::atomic<int32_t, cuda::thread_scope_block> internalNodeCounter;
     cuda::atomic<int32_t, cuda::thread_scope_block> processedJobsCounter;
 
-    Stack<BinnedSAHJob, 32> stack;
+    Stack<BinnedSAHJob, 64> stack;
 
     char buffer[1];
 
@@ -208,8 +208,10 @@ extern "C" __global__ void bvhInit()
 // 2) Optimize the BVH
 extern "C" __global__ void bvhAllocInternalNodes()
 {
+#if 0
     LOG("\n\n\n\nrender resolution {}\n", bvhParams.renderOutputResolution);
     LOG("pixels are at {}\n", bvhParams.renderOutput);
+#endif
 
     bvhParams.timingInfo->timingCounts.store_relaxed(0);
     bvhParams.timingInfo->tlasTime.store_relaxed(0);
@@ -693,9 +695,11 @@ extern "C" __global__ void bvhBuildSlow()
                                     min_cost_split_bucket);
                         }
 
+#if 0
                         LOG("Partition: {} -> {}; {} -> {}\n",
                                 current_job.start, mid_idx,
                                 mid_idx, current_job.end);
+#endif
                     }
 
                     uint32_t current_node_idx = pushInternalNode(
@@ -710,7 +714,7 @@ extern "C" __global__ void bvhBuildSlow()
                 __syncwarp();
             }
 
-#if 1
+#if 0
             if (threadIdx.x == 0) {
                 // Print everything
                 uint32_t num_internal_nodes =

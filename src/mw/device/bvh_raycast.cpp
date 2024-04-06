@@ -145,6 +145,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
 
             math::AABB child_aabb = child_node->aabb;
 
+#if 0
             if (child_is_leaf) {
                 INSPECT("({} of parent {}) Trace through leaf {} with AABB {} {} {} -> {} {} {}\n", 
                         i, node_idx, child_node_idx,
@@ -156,6 +157,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                         child_aabb.pMin.x, child_aabb.pMin.y, child_aabb.pMin.z,
                         child_aabb.pMax.x, child_aabb.pMax.y, child_aabb.pMax.z);
             }
+#endif
 
             float aabb_hit_t, aabb_far_t;
             Diag3x3 inv_ray_d = { 1.f/ray_d.x, 1.f/ray_d.y, 1.f/ray_d.z };
@@ -163,7 +165,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     4.0f, t_max, aabb_hit_t, aabb_far_t);
 
             if (aabb_hit_t <= t_max) {
-                INSPECT("HIT with the TLAS\n");
+                // INSPECT("HIT with the TLAS\n");
 
                 // If the near T of the box intersection happens before the closest
                 // intersection we got thus far, try tracing through.
@@ -212,7 +214,7 @@ static __device__ bool traceRayTLAS(uint32_t world_idx,
                     profiler->markState(ProfilerState::TLAS);
 
                     if (leaf_hit) {
-                        INSPECT("HIT with the BLAS!!!\n");
+                        // INSPECT("HIT with the BLAS!!!\n");
 
                         ray_hit = true;
                         t_max = hit_t * t_scale;
